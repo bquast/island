@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>island</title>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
+#enter {
+	position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+	padding: 12px 24px; font: 16px sans-serif; color: #fff;
+	background: rgba(0, 0, 0, 0.5); border: 1px solid #fff; border-radius: 6px; cursor: pointer;
+}
+#help {
+	position: fixed; left: 12px; top: 12px; font: 13px sans-serif; color: #fff;
+	text-shadow: 0 0 4px #000;
+}
+#cross {
+	position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+	font: 20px sans-serif; color: #fff; text-shadow: 0 0 3px #000; pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div id="help">Quest: left stick = move, right stick = turn, triggers = fire.<br>Desktop: W A S D = move, drag = look, Space = fire.</div>
+<div id="cross">+</div>
+<button id="enter">ENTER VR</button>
+<script src="three.min.js"></script>
+<script src="Water.js"></script>
+<script src="Sky.js"></script>
+<script src="game.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
