@@ -1,13 +1,17 @@
-// island game: guns and enemies.
-// Classic script. It uses ground(), slopeAt() and clamp() from main.js.
+// island game: guns, enemies and outposts.
+// Classic script. It uses ground(), slopeAt() and clamp() from world.js.
 // main.js calls makeGame() one time and updateGame() each frame.
+//
+// The goal: each outpost has guards. When all guards of an outpost are dead, the outpost is free.
 //
 // Order of this file:
 //   constants, sound, geometry, ray math, guns, effects, HUD, enemies, game.
 
 // ---------- constants ----------
 
-var ENEMY_COUNT = 10;
+var GUARDS = 5;               // enemies at each outpost
+var ROAMERS = 8;              // enemies that walk around on the islands
+var ENEMY_FAR = 450;         // m, enemies farther than this are not shown and do not move
 var ENEMY_SEE = 55;          // m, an enemy sees you at this distance
 var ENEMY_HEAR = 140;        // m, an enemy hears your shots at this distance
 var ENEMY_RANGE = 28;        // m, an enemy stops at this distance and shoots
@@ -354,15 +358,15 @@ function updateEffects(game, dt) {
 	}
 }
 
-// ---------- HUD: health and kills, in front of the eyes ----------
+// ---------- HUD: a small panel in front of the eyes ----------
 
 function makeHud(camera) {
 	var canvas = document.createElement('canvas');
 	canvas.width = 512;
-	canvas.height = 64;
+	canvas.height = 112;
 	var tex = new THREE.CanvasTexture(canvas);
 	tex.colorSpace = THREE.SRGBColorSpace;
-	var panel = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.05),
+	var panel = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.0875),
 		new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, fog: false, toneMapped: false }));
 	panel.position.set(-0.1, -0.27, -0.8);
 	panel.renderOrder = 1000;
@@ -377,45 +381,85 @@ function makeHud(camera) {
 	return { canvas: canvas, tex: tex, red: red, shown: '' };
 }
 
-function drawHud(hud, hp, kills, deaths) {
-	var text = Math.ceil(hp) + ' ' + kills + ' ' + deaths;
+// line 1: health, kills, free outposts. Line 2: an arrow and the distance to the nearest enemy outpost, and a hint.
+// target is { dist, turn } or null. turn is the angle from your view to the outpost (radians, + is right).
+function drawHud(hud, game, target) {
+	var text = [Math.ceil(game.hp), game.kills, game.freed, game.hint, target ? Math.round(target.dist / 10) : -1, target ? Math.round(target.turn * 5) : 0].join(' ');
 	if (text === hud.shown) {
 		return;
 	}
 	hud.shown = text;
 	var ctx = hud.canvas.getContext('2d');
-	ctx.clearRect(0, 0, 512, 64);
+	ctx.clearRect(0, 0, 512, 112);
 	ctx.fillStyle = 'rgba(0,0,0,0.45)';
-	ctx.fillRect(0, 0, 512, 64);
+	ctx.fillRect(0, 0, 512, 112);
 	ctx.fillStyle = '#5a1a14';
-	ctx.fillRect(12, 18, 200, 28);
-	ctx.fillStyle = hp > 35 ? '#4fd14a' : '#ff4a3a';
-	ctx.fillRect(12, 18, 200 * clamp(hp / 100, 0, 1), 28);
+	ctx.fillRect(12, 14, 170, 26);
+	ctx.fillStyle = game.hp > 35 ? '#4fd14a' : '#ff4a3a';
+	ctx.fillRect(12, 14, 170 * clamp(game.hp / 100, 0, 1), 26);
 	ctx.fillStyle = '#ffffff';
 	ctx.font = 'bold 26px sans-serif';
 	ctx.textBaseline = 'middle';
-	ctx.fillText('KILLS ' + kills, 228, 34);
-	ctx.fillText('DEATHS ' + deaths, 360, 34);
+	ctx.fillText('KILLS ' + game.kills, 198, 28);
+	ctx.fillText('FREE ' + game.freed + '/' + game.outposts.length, 345, 28);
+	if (target) {
+		ctx.save();
+		ctx.translate(28, 80);
+		ctx.rotate(target.turn);
+		ctx.beginPath();
+		ctx.moveTo(0, -15);
+		ctx.lineTo(11, 11);
+		ctx.lineTo(-11, 11);
+		ctx.fill();
+		ctx.restore();
+		ctx.fillText('OUTPOST ' + Math.round(target.dist / 10) * 10 + ' m', 52, 82);
+	} else {
+		ctx.fillText('ALL OUTPOSTS FREE', 14, 82);
+	}
+	ctx.fillStyle = '#ffe27a';
+	ctx.fillText(game.hint, 330, 82);
 	hud.tex.needsUpdate = true;
+}
+
+// the nearest outpost that is not free: distance and direction, for the HUD
+function nearestOutpost(game) {
+	var p = game.player.position;
+	var best = null, bestD = 1e9;
+	for (var i = 0; i < game.outposts.length; i++) {
+		var o = game.outposts[i];
+		var d = Math.sqrt((o.x - p.x) * (o.x - p.x) + (o.z - p.z) * (o.z - p.z));
+		if (!o.free && d < bestD) {
+			bestD = d;
+			best = o;
+		}
+	}
+	if (!best) {
+		return null;
+	}
+	var f = new THREE.Vector3();
+	game.camera.getWorldDirection(f);
+	var tx = best.x - p.x, tz = best.z - p.z;
+	return { dist: bestD, turn: Math.atan2(tx * -f.z + tz * f.x, tx * f.x + tz * f.z) };
 }
 
 // ---------- enemies ----------
 
 // a random location on land, not near the player
 function findSpawn(player) {
-	for (var i = 0; i < 300; i++) {
-		var x = (Math.random() - 0.5) * 760, z = (Math.random() - 0.5) * 760;
+	for (var i = 0; i < 400; i++) {
+		var x = (Math.random() - 0.5) * 3700, z = (Math.random() - 0.5) * 3700;
 		var h = ground(x, z);
 		var dx = x - player.position.x, dz = z - player.position.z;
-		if (h > 2 && h < 45 && slopeAt(x, z) < 0.5 && dx * dx + dz * dz > 90 * 90) {
+		if (h > 2 && h < 60 && slopeAt(x, z) < 0.5 && dx * dx + dz * dz > 150 * 150) {
 			return { x: x, z: z };
 		}
 	}
 	return { x: 150, z: 100 };
 }
 
+// put an enemy at the start of its life. A guard starts in its outpost (e.home). A roamer starts at a random location.
 function placeEnemy(e, player) {
-	var s = findSpawn(player);
+	var s = e.home ? { x: e.home.x + (Math.random() - 0.5) * 50, z: e.home.z + (Math.random() - 0.5) * 50 } : findSpawn(player);
 	e.x = s.x;
 	e.z = s.z;
 	e.y = ground(e.x, e.z);
@@ -428,34 +472,57 @@ function placeEnemy(e, player) {
 	e.group.rotation.x = 0;
 }
 
-function makeEnemies(parent, player, count) {
+function makeEnemy(parent, player, home, mat, bodyGeo, legGeo) {
+	var group = new THREE.Group();
+	var legL = new THREE.Mesh(legGeo, mat), legR = new THREE.Mesh(legGeo, mat);
+	legL.position.set(-0.13, 0.8, 0);
+	legR.position.set(0.13, 0.8, 0);
+	group.add(new THREE.Mesh(bodyGeo, mat));
+	group.add(legL);
+	group.add(legR);
+	group.rotation.order = 'YXZ';
+	parent.add(group);
+	var e = { group: group, legL: legL, legR: legR, home: home, x: 0, y: 0, z: 0, tx: 0, tz: 0, hp: 100, state: 'patrol', timer: 0, deadTime: 0, step: Math.random() * 6, side: 1 };
+	placeEnemy(e, player);
+	return e;
+}
+
+// GUARDS enemies for each outpost, and ROAMERS enemies with no home
+function makeEnemies(parent, player, outposts) {
 	var mat = new THREE.MeshLambertMaterial({ vertexColors: true });
 	var bodyGeo = enemyBodyGeometry(), legGeo = enemyLegGeometry();
 	var list = [];
-	for (var i = 0; i < count; i++) {
-		var group = new THREE.Group();
-		var legL = new THREE.Mesh(legGeo, mat), legR = new THREE.Mesh(legGeo, mat);
-		legL.position.set(-0.13, 0.8, 0);
-		legR.position.set(0.13, 0.8, 0);
-		group.add(new THREE.Mesh(bodyGeo, mat));
-		group.add(legL);
-		group.add(legR);
-		group.rotation.order = 'YXZ';
-		parent.add(group);
-		var e = { group: group, legL: legL, legR: legR, x: 0, y: 0, z: 0, tx: 0, tz: 0, hp: 100, state: 'patrol', timer: 0, deadTime: 0, step: Math.random() * 6, side: 1 };
-		placeEnemy(e, player);
-		list.push(e);
+	for (var i = 0; i < outposts.length; i++) {
+		outposts[i].alive = GUARDS;
+		for (var k = 0; k < GUARDS; k++) {
+			list.push(makeEnemy(parent, player, outposts[i], mat, bodyGeo, legGeo));
+		}
+	}
+	for (var r = 0; r < ROAMERS; r++) {
+		list.push(makeEnemy(parent, player, null, mat, bodyGeo, legGeo));
 	}
 	return list;
 }
 
 function hurtEnemy(game, e, damage) {
 	e.hp -= damage;
+	if (e.state === 'patrol') {
+		e.timer = 0.5 + Math.random();
+	}
 	e.state = 'alert';
 	if (e.hp <= 0) {
 		e.state = 'dead';
 		e.deadTime = 0;
 		game.kills++;
+		// the last guard of an outpost: the outpost is free, the flag becomes blue
+		if (e.home) {
+			e.home.alive--;
+			if (e.home.alive === 0) {
+				e.home.free = true;
+				e.home.flag.material.color.set(0x2a6fd6);
+				game.freed++;
+			}
+		}
 	}
 }
 
@@ -503,13 +570,20 @@ function updateEnemy(game, e, eye, dt) {
 	var moved = false;
 
 	if (e.state === 'dead') {
-		// fall on the back, stay for 6 s, then start again at a new location
+		// fall on the back and stay for 8 s. A guard stays dead. A roamer starts again at a new location.
 		e.deadTime += dt;
+		e.group.visible = e.deadTime < 8 && dist < ENEMY_FAR;
 		e.group.rotation.x = -Math.min(1, e.deadTime / 0.35) * Math.PI / 2;
 		e.group.position.set(e.x, e.y + 0.14, e.z);
-		if (e.deadTime > 6) {
+		if (!e.home && e.deadTime > 25) {
 			placeEnemy(e, game.player);
 		}
+		return;
+	}
+
+	// far enemies are not shown and do not move
+	e.group.visible = dist < ENEMY_FAR;
+	if (dist >= ENEMY_FAR) {
 		return;
 	}
 
@@ -519,11 +593,12 @@ function updateEnemy(game, e, eye, dt) {
 			e.timer = 0.6 + Math.random();
 		}
 		// walk to a point near. When it is there, or the way is blocked, select a new point.
+		// A guard stays near its outpost.
 		e.timer -= dt;
 		moved = walkEnemy(e, e.tx, e.tz, 1.5, dt);
 		if (!moved && e.timer <= 0) {
-			e.tx = e.x + (Math.random() - 0.5) * 50;
-			e.tz = e.z + (Math.random() - 0.5) * 50;
+			e.tx = (e.home ? e.home.x : e.x) + (Math.random() - 0.5) * 60;
+			e.tz = (e.home ? e.home.z : e.z) + (Math.random() - 0.5) * 60;
 			e.timer = 1 + Math.random() * 3;
 		}
 		if (moved) {
@@ -563,13 +638,16 @@ function updateEnemy(game, e, eye, dt) {
 // ---------- game ----------
 
 // parent is the group for the enemies. start is { x, z, yaw }: the player goes there after death.
-function makeGame(scene, player, camera, renderer, parent, puffTex, start) {
+// outposts is the list from world.js.
+function makeGame(scene, player, camera, renderer, parent, puffTex, start, outposts) {
 	var game = {
-		scene: scene, player: player, camera: camera, renderer: renderer, start: start,
-		hp: 100, kills: 0, deaths: 0,
+		scene: scene, player: player, camera: camera, renderer: renderer, start: start, outposts: outposts,
+		hp: 100, kills: 0, deaths: 0, freed: 0,
+		hint: '',         // short text on the HUD, for example how to enter a vehicle
+		restarted: false, // true for one frame after the death of the player
 		noise: 0,         // seconds that the enemies can still hear the last shot
 		hurtTime: 99,     // seconds after the last hit on the player
-		enemies: makeEnemies(parent, player, ENEMY_COUNT),
+		enemies: makeEnemies(parent, player, outposts),
 		tracers: makeTracers(scene, 12), nextTracer: 0,
 		puffs: makePuffs(scene, puffTex, 8), nextPuff: 0,
 		hud: makeHud(camera),
@@ -581,18 +659,22 @@ function makeGame(scene, player, camera, renderer, parent, puffTex, start) {
 	return game;
 }
 
-// the player died: go back to the start. Enemies near the start go to other locations.
+// the player died: go back to the start camp. The enemies stop the attack. Roamers near the camp go to other locations.
 function restartPlayer(game) {
 	game.deaths++;
 	game.hp = 100;
+	game.restarted = true;
 	game.player.position.set(game.start.x, 0, game.start.z);
 	game.player.rotation.y = game.start.yaw;
 	game.hud.red.material.opacity = 0.8;
 	for (var i = 0; i < game.enemies.length; i++) {
 		var e = game.enemies[i];
 		var dx = e.x - game.start.x, dz = e.z - game.start.z;
-		e.state = e.state === 'dead' ? 'dead' : 'patrol';
-		if (dx * dx + dz * dz < 90 * 90) {
+		if (e.state === 'dead') {
+			continue;
+		}
+		e.state = 'patrol';
+		if (!e.home && dx * dx + dz * dz < 150 * 150) {
 			placeEnemy(e, game.player);
 		}
 	}
@@ -603,11 +685,11 @@ function updateGame(game, dt, keys) {
 	var eye = new THREE.Vector3();
 	game.camera.getWorldPosition(eye);
 
-	// guns
+	// guns. Desktop: Space or a click fires.
 	updateHand(game, game.hands[0], dt);
 	updateHand(game, game.hands[1], dt);
 	game.desk.controller.visible = !inVR;
-	game.desk.held = !inVR && keys.Space === true;
+	game.desk.held = !inVR && (keys.Space === true || keys.Mouse === true);
 	updateHand(game, game.desk, dt);
 
 	// enemies
@@ -627,5 +709,5 @@ function updateGame(game, dt, keys) {
 
 	updateEffects(game, dt);
 	game.hud.red.material.opacity = Math.max(0, game.hud.red.material.opacity - dt * 1.2);
-	drawHud(game.hud, game.hp, game.kills, game.deaths);
+	drawHud(game.hud, game, nearestOutpost(game));
 }

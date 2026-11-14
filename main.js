@@ -1,79 +1,33 @@
-// island: a volcanic tropical island for Meta Quest 3 (WebXR), three.js r159.
+// island: a large volcanic archipelago for Meta Quest 3 (WebXR), three.js r159.
 // Classic script. Global THREE. Units are meters.
 //
+// The files:
+//   world.js     the shape of the land: heights, outposts, roads
+//   game.js      guns, enemies, outposts, HUD
+//   vehicles.js  jeeps and boats
+//   main.js      this file: all the graphics of the world, the input, the main loop
+//
 // Order of this file:
-//   constants, math, terrain, textures, plants, rocks, shadows, camp,
+//   constants, colors, terrain pieces, textures, plants, rocks, shadows, camp and outposts,
 //   lava, sky and water, clouds and smoke, birds, sound, input, player, main.
-// The guns and the enemies are in game.js.
 
 // ---------- constants ----------
 
-var SIZE = 1100;         // side of the terrain square
-var GRID = 220;          // cells on each side (5 m cells)
-var CELL = SIZE / GRID;
-var ISLAND_R = 330;      // approximate radius of the island
-var VOLC_X = 60;         // volcano center
-var VOLC_Z = -90;
-var VOLC_R = 190;        // radius of the volcano base
-var VOLC_H = 150;        // height of the cone before the crater cut
-var CRATER_R = 28;
-var CRATER_DEPTH = 26;
-var LAGOON_X = -20;
-var LAGOON_Z = 215;
-var JETTY_LEN = 30;
-var JETTY_Y = 0.7;
 var EYE_H = 1.7;         // desktop eye height
 var WALK_SPEED = 6;      // m/s
+var SWIM_SPEED = 2.2;    // m/s, in deep water
 var SNAP_ANGLE = Math.PI / 6;
 var SUN_ELEVATION = 27;  // degrees
 var SUN_AZIMUTH = -112;  // degrees
 var GRASS_N = 60;        // grass cells on each side of the square around the player
 var GRASS_CELL = 0.9;    // one grass tuft for each cell
 var FOG_COLOR = 0xd2d8dc; // same as the sky at the horizon
+var CHUNK = 25;          // grid cells on each side of a terrain piece (200 m)
+var FINE_DIST = 700;     // m, terrain pieces nearer than this show all grid points
+var TREE_DIST = 800;     // m, trees and palms are visible to this distance
+var SMALL_DIST = 260;    // m, bushes and rocks are visible to this distance
 
-// ---------- math ----------
-
-function clamp(v, lo, hi) {
-	return Math.max(lo, Math.min(hi, v));
-}
-
-function smooth(t) {
-	return t * t * (3 - 2 * t);
-}
-
-function hash(x, z) {
-	var s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
-	return s - Math.floor(s);
-}
-
-function noise(x, z) {
-	var xi = Math.floor(x), zi = Math.floor(z);
-	var u = smooth(x - xi), v = smooth(z - zi);
-	var a = hash(xi, zi), b = hash(xi + 1, zi);
-	var c = hash(xi, zi + 1), d = hash(xi + 1, zi + 1);
-	return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
-}
-
-function fbm(x, z) {
-	return noise(x, z) * 0.5 + noise(x * 2, z * 2) * 0.25 + noise(x * 4, z * 4) * 0.125 + noise(x * 8, z * 8) * 0.0625;
-}
-
-// a round hill with center (cx, cz). The result is 1 at the center.
-function bump(x, z, cx, cz, r) {
-	var dx = x - cx, dz = z - cz;
-	return Math.exp(-(dx * dx + dz * dz) / (r * r));
-}
-
-// seeded random numbers, so the island is the same on each load
-function makeRandom(seed) {
-	var s = seed;
-	return function () {
-		s = (s + 0x6D2B79F5) | 0;
-		var t = Math.imul(s ^ (s >>> 15), 1 | s);
-		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
+// ---------- colors ----------
 
 // color as [r, g, b] in linear space, from a hex value
 function rgb(hex) {
@@ -85,77 +39,16 @@ function mix3(a, b, t) {
 	return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
-// ---------- terrain ----------
+// colors and normals for all grid points. The terrain pieces copy from these.
+var COLOR = new Float32Array((GRID + 1) * (GRID + 1) * 3);
+var NORMAL = new Float32Array((GRID + 1) * (GRID + 1) * 3);
 
-// height from the formula. Sea level is 0. Used one time, to fill the grid.
-function height(x, z) {
-	var n = fbm(x * 0.005 + 5, z * 0.005 + 5);
-	var m = fbm(x * 0.02 + 40, z * 0.02 + 40);
-	var r = Math.sqrt(x * x + z * z);
-	var h = Math.max((1 - r / (ISLAND_R * (0.55 + 0.9 * n))) * 30, -14);
-	h += 60 * bump(x, z, -170, 20, 90) * (0.5 + m);       // west ridge
-	h += 34 * bump(x, z, 170, 130, 70) * (0.5 + m);       // east hill
-	h -= 20 * bump(x, z, LAGOON_X, LAGOON_Z, 75);         // lagoon
-	h += 24 * bump(x, z, 300, 330, 45);                   // small island
-	h += 20 * bump(x, z, -380, -220, 40);                 // small island
-	h = h > 0 ? h * h / (h + 5) : h * 0.6;                // flat beaches, shallow shelf
-	h += (m - 0.5) * 9 * clamp(h / 5, 0, 1);              // rough ground on land
-
-	var dx = x - VOLC_X, dz = z - VOLC_Z;
-	var d = Math.sqrt(dx * dx + dz * dz);
-	var cone = Math.max(0, 1 - Math.max(d, CRATER_R) / VOLC_R);
-	h += Math.pow(cone, 1.7) * VOLC_H * (0.85 + 0.3 * m);
-	h += cone * (1 - cone) * 14 * Math.sin(Math.atan2(dz, dx) * 13 + m * 8);  // gullies
-	if (d < CRATER_R) {
-		h -= smooth(1 - d / CRATER_R) * CRATER_DEPTH;
-	}
-	return h;
-}
-
-// the height grid. All other code reads the ground from this grid.
-var H = new Float32Array((GRID + 1) * (GRID + 1));
-
-function fillHeights() {
-	for (var iz = 0; iz <= GRID; iz++) {
-		for (var ix = 0; ix <= GRID; ix++) {
-			H[iz * (GRID + 1) + ix] = height(ix * CELL - SIZE / 2, iz * CELL - SIZE / 2);
-		}
-	}
-}
-
-// height of the terrain mesh at (x, z). Same triangles as the mesh.
-function ground(x, z) {
-	var fx = clamp((x + SIZE / 2) / CELL, 0, GRID - 0.001);
-	var fz = clamp((z + SIZE / 2) / CELL, 0, GRID - 0.001);
-	var ix = Math.floor(fx), iz = Math.floor(fz);
-	fx -= ix;
-	fz -= iz;
-	var i = iz * (GRID + 1) + ix;
-	var a = H[i], d = H[i + 1], b = H[i + GRID + 1], c = H[i + GRID + 2];
-	if (fx + fz < 1) {
-		return a + (d - a) * fx + (b - a) * fz;
-	}
-	return c + (b - c) * (1 - fx) + (d - c) * (1 - fz);
-}
-
-function slopeX(x, z) {
-	return (ground(x + 2.5, z) - ground(x - 2.5, z)) / 5;
-}
-
-function slopeZ(x, z) {
-	return (ground(x, z + 2.5) - ground(x, z - 2.5)) / 5;
-}
-
-function slopeAt(x, z) {
-	var gx = slopeX(x, z), gz = slopeZ(x, z);
-	return Math.sqrt(gx * gx + gz * gz);
-}
-
-function groundColor(x, z, h, slope, pal) {
+function groundColor(x, z, h, slope, road, pal) {
 	var n = fbm(x * 0.02, z * 0.02);
 	var n2 = fbm(x * 0.08 + 3, z * 0.08 + 7);
+	var n3 = fbm(x * 0.004 + 31, z * 0.004 + 17);   // large areas: jungle or dry grass
 	var dx = x - VOLC_X, dz = z - VOLC_Z;
-	var nearVolc = clamp(1 - Math.sqrt(dx * dx + dz * dz) / 300, 0, 1);
+	var nearVolc = clamp(1 - Math.sqrt(dx * dx + dz * dz) / 800, 0, 1);
 
 	var sand = mix3(pal.sand, pal.blackSand, smooth(clamp((nearVolc - 0.2) / 0.25, 0, 1)));
 	sand = mix3(sand, mix3(sand, [0, 0, 0], 0.35), clamp(1 - h / 0.7, 0, 1));   // wet sand
@@ -165,26 +58,24 @@ function groundColor(x, z, h, slope, pal) {
 	}
 	var grass = mix3(pal.grassDark, pal.grassLight, clamp(n * 1.6 - 0.2, 0, 1));
 	grass = mix3(grass, pal.grassDry, clamp((n2 - 0.5) * 4, 0, 1) * 0.6);
+	grass = mix3(grass, pal.savanna, smooth(clamp((n3 - 0.5) * 5, 0, 1)) * 0.7);
 	var c = mix3(sand, grass, smooth(clamp((h - 2.2 - n2 * 1.5) / 1.6, 0, 1)));
+	c = mix3(c, pal.dirt, road * 0.9);
 	var rock = mix3(pal.rock, pal.rockDark, n2);
-	c = mix3(c, rock, smooth(clamp((slope - 0.5) / 0.3, 0, 1)));
+	c = mix3(c, rock, smooth(clamp((slope - 0.62) / 0.33, 0, 1)));
 	var basalt = mix3(pal.basalt, pal.rust, clamp((n2 - 0.45) * 3, 0, 1) * 0.6);
-	c = mix3(c, basalt, smooth(clamp((h - 48 - 30 * n) / 22, 0, 1)));
+	c = mix3(c, basalt, smooth(clamp((h - 120 - 70 * n) / 40, 0, 1)));
 	return c;
 }
 
-function makeTerrain(detailTex) {
+function fillColors() {
 	var pal = {
 		sand: rgb(0xffe6ac), blackSand: rgb(0x4a4642),
 		seaShallow: rgb(0x9ff5e0), seaDeep: rgb(0x04283f),
-		grassLight: rgb(0x7fa64a), grassDark: rgb(0x355f2e), grassDry: rgb(0xa9a25a),
-		rock: rgb(0x7d7467), rockDark: rgb(0x453e39),
-		basalt: rgb(0x6a625c), rust: rgb(0x7a4630)
+		grassLight: rgb(0x7fa64a), grassDark: rgb(0x355f2e), grassDry: rgb(0xa9a25a), savanna: rgb(0xb7a65c),
+		rock: rgb(0x8d8474), rockDark: rgb(0x5e564d),
+		basalt: rgb(0x7a726b), rust: rgb(0x7a4630), dirt: rgb(0x9c7a52)
 	};
-	var geo = new THREE.PlaneGeometry(SIZE, SIZE, GRID, GRID);
-	geo.rotateX(-Math.PI / 2);
-	var pos = geo.attributes.position;
-	var colors = new Float32Array(pos.count * 3);
 	for (var iz = 0; iz <= GRID; iz++) {
 		for (var ix = 0; ix <= GRID; ix++) {
 			var i = iz * (GRID + 1) + ix;
@@ -192,16 +83,119 @@ function makeTerrain(detailTex) {
 			var z0 = Math.max(iz - 1, 0), z1 = Math.min(iz + 1, GRID);
 			var gx = (H[iz * (GRID + 1) + x1] - H[iz * (GRID + 1) + x0]) / ((x1 - x0) * CELL);
 			var gz = (H[z1 * (GRID + 1) + ix] - H[z0 * (GRID + 1) + ix]) / ((z1 - z0) * CELL);
-			var c = groundColor(pos.getX(i), pos.getZ(i), H[i], Math.sqrt(gx * gx + gz * gz), pal);
-			pos.setY(i, H[i]);
-			colors[i * 3] = c[0];
-			colors[i * 3 + 1] = c[1];
-			colors[i * 3 + 2] = c[2];
+			var c = groundColor(ix * CELL - SIZE / 2, iz * CELL - SIZE / 2, H[i], Math.sqrt(gx * gx + gz * gz), ROAD[i], pal);
+			var len = Math.sqrt(gx * gx + 1 + gz * gz);
+			COLOR[i * 3] = c[0];
+			COLOR[i * 3 + 1] = c[1];
+			COLOR[i * 3 + 2] = c[2];
+			NORMAL[i * 3] = -gx / len;
+			NORMAL[i * 3 + 1] = 1 / len;
+			NORMAL[i * 3 + 2] = -gz / len;
 		}
 	}
-	geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-	geo.computeVertexNormals();
-	return new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: detailTex }));
+}
+
+// ---------- terrain pieces ----------
+
+// The terrain is a grid of square pieces (chunks). Each piece has 2 meshes:
+// a fine mesh for near, and a coarse mesh for far. Only one of them is visible.
+// A skirt (a wall that goes down at the 4 edges) hides the gaps between fine and coarse pieces.
+
+// a square patch of the grid. i0, j0 = first grid point. cells = grid cells on each side.
+// step = 1 uses all grid points, step = 5 uses each 5th point. skirt = depth of the wall at the edges (0 = none).
+function patchGeometry(i0, j0, cells, step, skirt) {
+	var n = cells / step;
+	var pos = [], nor = [], col = [], uv = [], idx = [];
+	function point(i, j, drop) {
+		var g = (j0 + j * step) * (GRID + 1) + i0 + i * step;
+		var x = (i0 + i * step) * CELL - SIZE / 2, z = (j0 + j * step) * CELL - SIZE / 2;
+		pos.push(x, H[g] - drop, z);
+		nor.push(NORMAL[g * 3], NORMAL[g * 3 + 1], NORMAL[g * 3 + 2]);
+		col.push(COLOR[g * 3], COLOR[g * 3 + 1], COLOR[g * 3 + 2]);
+		uv.push(x / 3.9, z / 3.9);
+		return pos.length / 3 - 1;
+	}
+	for (var j = 0; j <= n; j++) {
+		for (var i = 0; i <= n; i++) {
+			point(i, j, 0);
+		}
+	}
+	// the same 2 triangles for each cell as in ground()
+	for (var q = 0; q < n; q++) {
+		for (var p = 0; p < n; p++) {
+			var a = q * (n + 1) + p, d = a + 1, b = a + n + 1, c = b + 1;
+			idx.push(a, b, d, b, c, d);
+		}
+	}
+	// skirt: for each edge point, one more point below it. Triangles on the 2 sides, thus the wall is visible from all directions.
+	function wall(i, j, di, dj) {
+		var top0 = j * (n + 1) + i, top1 = (j + dj) * (n + 1) + i + di;
+		var low0 = point(i, j, skirt), low1 = point(i + di, j + dj, skirt);
+		idx.push(top0, low0, top1, top1, low0, low1, top0, top1, low0, top1, low1, low0);
+	}
+	for (var k = 0; skirt > 0 && k < n; k++) {
+		wall(k, 0, 1, 0);
+		wall(k, n, 1, 0);
+		wall(0, k, 0, 1);
+		wall(n, k, 0, 1);
+	}
+	var geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+	geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+	geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+	geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+	geo.setIndex(idx);
+	return geo;
+}
+
+// make all terrain pieces, with their plants. Pieces that are only deep sea are not made.
+// clear(x, z) is true where plants can grow.
+function makeChunks(parent, terrainMat, assets, sun, clear) {
+	var chunks = [];
+	var counts = { pieces: 0, palms: 0, trees: 0, bushes: 0, rocks: 0 };
+	for (var cz = 0; cz < GRID / CHUNK; cz++) {
+		for (var cx = 0; cx < GRID / CHUNK; cx++) {
+			var i0 = cx * CHUNK, j0 = cz * CHUNK;
+			var top = -99;
+			for (var j = 0; j <= CHUNK; j++) {
+				for (var i = 0; i <= CHUNK; i++) {
+					top = Math.max(top, H[(j0 + j) * (GRID + 1) + i0 + i]);
+				}
+			}
+			if (top < -8) {
+				continue;
+			}
+			var chunk = {
+				x: (i0 + CHUNK / 2) * CELL - SIZE / 2, z: (j0 + CHUNK / 2) * CELL - SIZE / 2,
+				fine: new THREE.Mesh(patchGeometry(i0, j0, CHUNK, 1, 6), terrainMat),
+				coarse: new THREE.Mesh(patchGeometry(i0, j0, CHUNK, 5, 30), terrainMat),
+				trees: new THREE.Group(), small: new THREE.Group()
+			};
+			if (top > 1) {
+				makeChunkPlants(chunk, cx, cz, assets, sun, clear, counts);
+			}
+			parent.add(chunk.fine);
+			parent.add(chunk.coarse);
+			parent.add(chunk.trees);
+			parent.add(chunk.small);
+			chunks.push(chunk);
+			counts.pieces++;
+		}
+	}
+	console.log('island:', JSON.stringify(counts));
+	return chunks;
+}
+
+// show the fine or the coarse mesh of each piece, and show the plants of the near pieces
+function showChunks(chunks, px, pz) {
+	for (var i = 0; i < chunks.length; i++) {
+		var c = chunks[i];
+		var d = Math.sqrt((c.x - px) * (c.x - px) + (c.z - pz) * (c.z - pz));
+		c.fine.visible = d < FINE_DIST;
+		c.coarse.visible = d >= FINE_DIST;
+		c.trees.visible = d < TREE_DIST;
+		c.small.visible = d < SMALL_DIST;
+	}
 }
 
 // a flat floor below the sea, for the area out of the terrain square
@@ -438,7 +432,7 @@ function leafMaterial(tex, alphaTest, glsl) {
 	return mat;
 }
 
-// ---------- palms ----------
+// ---------- plants and rocks: shapes ----------
 
 // one frond along +x, length 1. It goes up a small distance, then down.
 function frondGeometry() {
@@ -475,12 +469,74 @@ function palmTrunkGeometry() {
 	return geo;
 }
 
-// find locations for plants. accept(x, z, h) gives true for a good location.
-function scatter(count, seed, accept) {
-	var rand = makeRandom(seed);
+// leaf cards in a ball. The normals point out from the center, for soft light.
+function crownGeometry(cards) {
+	var rand = makeRandom(13);
+	var quads = [];
+	for (var i = 0; i < cards; i++) {
+		var c = new THREE.Vector3(rand() - 0.5, (rand() - 0.5) * 0.7, rand() - 0.5).multiplyScalar(1.3);
+		var a = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
+		var b = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).cross(a).normalize();
+		a.multiplyScalar(0.75);
+		b.multiplyScalar(0.75);
+		quads.push([
+			[c.x - a.x - b.x, c.y - a.y - b.y, c.z - a.z - b.z],
+			[c.x + a.x - b.x, c.y + a.y - b.y, c.z + a.z - b.z],
+			[c.x + a.x + b.x, c.y + a.y + b.y, c.z + a.z + b.z],
+			[c.x - a.x + b.x, c.y - a.y + b.y, c.z - a.z + b.z]
+		]);
+	}
+	return quadGeometry(quads, function (p) {
+		var n = new THREE.Vector3(p[0], p[1] + 0.6, p[2]).normalize();
+		return [n.x, n.y, n.z];
+	});
+}
+
+function rockGeometry() {
+	var geo = new THREE.IcosahedronGeometry(1, 1);
+	var pos = geo.attributes.position;
+	for (var i = 0; i < pos.count; i++) {
+		var x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+		var f = 0.72 + 0.5 * hash(Math.round(x * 20) + Math.round(y * 20) * 3, Math.round(z * 20));
+		pos.setXYZ(i, x * f, y * f, z * f);
+	}
+	geo.computeVertexNormals();
+	return geo;
+}
+
+// the shapes and materials that all terrain pieces use together
+function makeAssets(frondTex, leavesTex, blobTex) {
+	var treeTrunk = new THREE.CylinderGeometry(0.16, 0.34, 1, 6);
+	treeTrunk.translate(0, 0.5, 0);
+	var shadow = new THREE.PlaneGeometry(2, 2);
+	shadow.rotateX(-Math.PI / 2);
+	return {
+		palmTrunk: palmTrunkGeometry(),
+		palmTrunkMat: new THREE.MeshLambertMaterial({ color: 0x9a8468 }),
+		frond: frondGeometry(),
+		frondMat: leafMaterial(frondTex, 0.4, 'transformed.y += sin(windTime * 1.4 + instanceMatrix[3][0] + instanceMatrix[0][0] * 9.0) * 0.045 * uv.x * uv.x;'),
+		treeTrunk: treeTrunk,
+		treeTrunkMat: new THREE.MeshLambertMaterial({ color: 0x6a5642 }),
+		crown: crownGeometry(18),
+		bush: crownGeometry(8),
+		leafMat: leafMaterial(leavesTex, 0.5, 'transformed.x += sin(windTime * 1.1 + instanceMatrix[3][0] * 0.3 + position.y * 2.0) * 0.035;'),
+		rock: rockGeometry(),
+		rockMat: new THREE.MeshLambertMaterial({ color: 0xffffff }),
+		shadow: shadow,
+		shadowMat: new THREE.MeshBasicMaterial({
+			map: blobTex, color: 0x0a1a10, transparent: true, opacity: 0.5, depthWrite: false,
+			polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
+		})
+	};
+}
+
+// ---------- plants and rocks: one terrain piece ----------
+
+// random locations in a square. accept(x, z, h) gives true for a good location.
+function spots(rand, x0, z0, side, tries, accept) {
 	var out = [];
-	for (var tries = 0; tries < count * 200 && out.length < count; tries++) {
-		var x = (rand() - 0.5) * SIZE * 0.96, z = (rand() - 0.5) * SIZE * 0.96;
+	for (var t = 0; t < tries; t++) {
+		var x = x0 + rand() * side, z = z0 + rand() * side;
 		var h = ground(x, z);
 		if (accept(x, z, h)) {
 			out.push({ x: x, z: z, h: h });
@@ -489,19 +545,15 @@ function scatter(count, seed, accept) {
 	return out;
 }
 
-// palms: returns { mesh, tops }. tops is used for the shadows.
-function makePalms(spots, frondTex) {
-	var rand = makeRandom(8);
+// palms. tops gets one entry for each palm, for the shadows.
+function buildPalms(list, rand, assets, tops) {
 	var perPalm = 11;
-	var trunkMat = new THREE.MeshLambertMaterial({ color: 0x9a8468 });
-	var frondMat = leafMaterial(frondTex, 0.4, 'transformed.y += sin(windTime * 1.4 + instanceMatrix[3][0] + instanceMatrix[0][0] * 9.0) * 0.045 * uv.x * uv.x;');
-	var trunks = new THREE.InstancedMesh(palmTrunkGeometry(), trunkMat, spots.length);
-	var fronds = new THREE.InstancedMesh(frondGeometry(), frondMat, spots.length * perPalm);
+	var trunks = new THREE.InstancedMesh(assets.palmTrunk, assets.palmTrunkMat, list.length);
+	var fronds = new THREE.InstancedMesh(assets.frond, assets.frondMat, list.length * perPalm);
 	var dummy = new THREE.Object3D();
 	var top = new THREE.Vector3();
-	var tops = [];
-	for (var i = 0; i < spots.length; i++) {
-		var s = spots[i];
+	for (var i = 0; i < list.length; i++) {
+		var s = list[i];
 		var tall = 6 + rand() * 6;
 		dummy.position.set(s.x, s.h - 0.3, s.z);
 		dummy.rotation.set(0, rand() * Math.PI * 2, 0, 'XYZ');
@@ -522,48 +574,17 @@ function makePalms(spots, frondTex) {
 	var group = new THREE.Group();
 	group.add(trunks);
 	group.add(fronds);
-	return { mesh: group, tops: tops };
+	return group;
 }
 
-// ---------- jungle trees and bushes ----------
-
-// leaf cards in a ball. The normals point out from the center, for soft light.
-function crownGeometry() {
-	var rand = makeRandom(13);
-	var quads = [];
-	for (var i = 0; i < 18; i++) {
-		var c = new THREE.Vector3(rand() - 0.5, (rand() - 0.5) * 0.7, rand() - 0.5).multiplyScalar(1.3);
-		var a = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
-		var b = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).cross(a).normalize();
-		a.multiplyScalar(0.75);
-		b.multiplyScalar(0.75);
-		quads.push([
-			[c.x - a.x - b.x, c.y - a.y - b.y, c.z - a.z - b.z],
-			[c.x + a.x - b.x, c.y + a.y - b.y, c.z + a.z - b.z],
-			[c.x + a.x + b.x, c.y + a.y + b.y, c.z + a.z + b.z],
-			[c.x - a.x + b.x, c.y - a.y + b.y, c.z - a.z + b.z]
-		]);
-	}
-	return quadGeometry(quads, function (p) {
-		var n = new THREE.Vector3(p[0], p[1] + 0.6, p[2]).normalize();
-		return [n.x, n.y, n.z];
-	});
-}
-
-// trees: a trunk and 2 crowns for each tree. Bushes: 1 small crown on the ground.
-function makeJungle(treeSpots, bushSpots, leavesTex) {
-	var rand = makeRandom(9);
-	var trunkGeo = new THREE.CylinderGeometry(0.16, 0.34, 1, 6);
-	trunkGeo.translate(0, 0.5, 0);
-	var leafMat = leafMaterial(leavesTex, 0.5, 'transformed.x += sin(windTime * 1.1 + instanceMatrix[3][0] * 0.3 + position.y * 2.0) * 0.035;');
-	var trunks = new THREE.InstancedMesh(trunkGeo, new THREE.MeshLambertMaterial({ color: 0x6a5642 }), treeSpots.length);
-	var crowns = new THREE.InstancedMesh(crownGeometry(), leafMat, treeSpots.length * 2 + bushSpots.length);
+// jungle trees: a trunk and 2 crowns for each tree
+function buildTrees(list, rand, assets, tops) {
+	var trunks = new THREE.InstancedMesh(assets.treeTrunk, assets.treeTrunkMat, list.length);
+	var crowns = new THREE.InstancedMesh(assets.crown, assets.leafMat, list.length * 2);
 	var dummy = new THREE.Object3D();
 	var color = new THREE.Color();
-	var tops = [];
-	var k = 0;
-	for (var i = 0; i < treeSpots.length; i++) {
-		var s = treeSpots[i];
+	for (var i = 0; i < list.length; i++) {
+		var s = list[i];
 		var tall = 5 + rand() * 6;
 		dummy.position.set(s.x, s.h - 0.3, s.z);
 		dummy.rotation.set((rand() - 0.5) * 0.2, 0, (rand() - 0.5) * 0.2, 'XYZ');
@@ -576,27 +597,123 @@ function makeJungle(treeSpots, bushSpots, leavesTex) {
 			dummy.rotation.set(0, rand() * 6.28, 0, 'XYZ');
 			dummy.scale.set(size, size * 0.8, size);
 			dummy.updateMatrix();
-			crowns.setMatrixAt(k, dummy.matrix);
-			crowns.setColorAt(k, color.setHSL(0.25 + rand() * 0.1, 0.3, 0.6 + rand() * 0.3));
-			k++;
+			crowns.setMatrixAt(i * 2 + j, dummy.matrix);
+			crowns.setColorAt(i * 2 + j, color.setHSL(0.25 + rand() * 0.1, 0.3, 0.6 + rand() * 0.3));
 		}
 		tops.push({ x: s.x, z: s.z, tall: tall, r: 4.5 });
-	}
-	for (var b = 0; b < bushSpots.length; b++) {
-		var p = bushSpots[b];
-		var bs = 0.6 + rand() * 0.9;
-		dummy.position.set(p.x, p.h + bs * 0.45, p.z);
-		dummy.rotation.set(0, rand() * 6.28, 0, 'XYZ');
-		dummy.scale.set(bs, bs * 0.7, bs);
-		dummy.updateMatrix();
-		crowns.setMatrixAt(k, dummy.matrix);
-		crowns.setColorAt(k, color.setHSL(0.22 + rand() * 0.12, 0.3, 0.55 + rand() * 0.35));
-		k++;
 	}
 	var group = new THREE.Group();
 	group.add(trunks);
 	group.add(crowns);
-	return { mesh: group, tops: tops };
+	return group;
+}
+
+function buildBushes(list, rand, assets) {
+	var mesh = new THREE.InstancedMesh(assets.bush, assets.leafMat, list.length);
+	var dummy = new THREE.Object3D();
+	var color = new THREE.Color();
+	for (var i = 0; i < list.length; i++) {
+		var s = list[i];
+		var size = 0.7 + rand() * 1.1;
+		dummy.position.set(s.x, s.h + size * 0.45, s.z);
+		dummy.rotation.set(0, rand() * 6.28, 0, 'XYZ');
+		dummy.scale.set(size, size * 0.7, size);
+		dummy.updateMatrix();
+		mesh.setMatrixAt(i, dummy.matrix);
+		mesh.setColorAt(i, color.setHSL(0.22 + rand() * 0.12, 0.3, 0.55 + rand() * 0.35));
+	}
+	return mesh;
+}
+
+// land rocks are small. Sea rocks are tall.
+function buildRocks(land, sea, rand, assets) {
+	var mesh = new THREE.InstancedMesh(assets.rock, assets.rockMat, land.length + sea.length);
+	var dummy = new THREE.Object3D();
+	var color = new THREE.Color();
+	for (var i = 0; i < land.length + sea.length; i++) {
+		var inSea = i >= land.length;
+		var s = inSea ? sea[i - land.length] : land[i];
+		var size = inSea ? 3 + rand() * 5 : 0.3 + rand() * rand() * 2.5;
+		dummy.position.set(s.x, s.h + size * (inSea ? 0.6 : 0.2), s.z);
+		dummy.rotation.set(rand() * 0.5, rand() * 6.28, rand() * 0.5, 'XYZ');
+		dummy.scale.set(size, size * (inSea ? 1.6 + rand() : 0.6 + rand() * 0.5), size * (0.7 + rand() * 0.6));
+		dummy.updateMatrix();
+		mesh.setMatrixAt(i, dummy.matrix);
+		mesh.setColorAt(i, color.setHSL(0.07 + rand() * 0.04, 0.08 + rand() * 0.1, 0.16 + rand() * 0.22));
+	}
+	return mesh;
+}
+
+// a dark soft spot on the ground for each tree. The spot is on the side opposite to the sun.
+function buildShadows(tops, assets, sun) {
+	var mesh = new THREE.InstancedMesh(assets.shadow, assets.shadowMat, tops.length);
+	var dummy = new THREE.Object3D();
+	var up = new THREE.Vector3(0, 1, 0);
+	var normal = new THREE.Vector3();
+	var flat = Math.sqrt(sun.x * sun.x + sun.z * sun.z);
+	var count = 0;
+	for (var i = 0; i < tops.length; i++) {
+		var t = tops[i];
+		var away = t.tall * 0.8 * flat / sun.y;
+		var x = t.x - sun.x / flat * away, z = t.z - sun.z / flat * away;
+		var h = ground(x, z);
+		if (h < 0.3) {
+			continue;
+		}
+		normal.set(-slopeX(x, z), 1, -slopeZ(x, z)).normalize();
+		dummy.position.set(x, h + 0.12, z);
+		dummy.quaternion.setFromUnitVectors(up, normal);
+		dummy.scale.set(t.r, 1, t.r);
+		dummy.updateMatrix();
+		mesh.setMatrixAt(count, dummy.matrix);
+		count++;
+	}
+	mesh.count = count;
+	return mesh;
+}
+
+// the plants and rocks of one terrain piece. Each piece has its own random numbers, thus the world is the same on each load.
+function makeChunkPlants(chunk, cx, cz, assets, sun, clear, counts) {
+	var rand = makeRandom(1000 + cz * 100 + cx);
+	var side = CHUNK * CELL;
+	var x0 = chunk.x - side / 2, z0 = chunk.z - side / 2;
+	var palms = spots(rand, x0, z0, side, 45, function (x, z, h) {
+		return h > 1.5 && h < 9 && slopeAt(x, z) < 0.4 && clear(x, z);
+	});
+	// more trees in the jungle areas, few trees in the dry grass areas
+	var trees = spots(rand, x0, z0, side, 80, function (x, z, h) {
+		var jungle = fbm(x * 0.004 + 31, z * 0.004 + 17) < 0.5 || hash(x, z) < 0.15;
+		return h > 5 && h < 150 && slopeAt(x, z) < 0.6 && jungle && clear(x, z);
+	});
+	var bushes = spots(rand, x0, z0, side, 90, function (x, z, h) {
+		return h > 2.8 && h < 170 && slopeAt(x, z) < 0.7 && clear(x, z);
+	});
+	var rocks = spots(rand, x0, z0, side, 28, function (x, z, h) {
+		return h > -1.5 && (slopeAt(x, z) > 0.3 || h < 1.5 || h > 120) && clear(x, z);
+	});
+	var seaRocks = spots(rand, x0, z0, side, 2, function (x, z, h) {
+		return h > -6.5 && h < -3;
+	});
+	var tops = [];
+	if (palms.length > 0) {
+		chunk.trees.add(buildPalms(palms, rand, assets, tops));
+	}
+	if (trees.length > 0) {
+		chunk.trees.add(buildTrees(trees, rand, assets, tops));
+	}
+	if (tops.length > 0) {
+		chunk.trees.add(buildShadows(tops, assets, sun));
+	}
+	if (bushes.length > 0) {
+		chunk.small.add(buildBushes(bushes, rand, assets));
+	}
+	if (rocks.length + seaRocks.length > 0) {
+		chunk.small.add(buildRocks(rocks, seaRocks, rand, assets));
+	}
+	counts.palms += palms.length;
+	counts.trees += trees.length;
+	counts.bushes += bushes.length;
+	counts.rocks += rocks.length + seaRocks.length;
 }
 
 // ---------- grass and flowers (they follow the player) ----------
@@ -632,7 +749,7 @@ function placeTufts(mesh, px, pz, keep, salt) {
 			var h = ground(x, z);
 			var dist = Math.sqrt((x - px) * (x - px) + (z - pz) * (z - pz));
 			var s = (0.7 + hash(gx + 5, gz + 9 + salt) * 0.8) * clamp((reach - dist) / 6, 0, 1);
-			if (h < 2.9 || h > 70 || slopeAt(x, z) > 0.7 || hash(gx * 3.1 + salt, gz * 1.7) > keep) {
+			if (h < 2.9 || h > 170 || roadAt(x, z) > 0.25 || slopeAt(x, z) > 0.7 || hash(gx * 3.1 + salt, gz * 1.7) > keep) {
 				s = 0;
 			}
 			dummy.position.set(x, h - 0.05, z);
@@ -646,82 +763,12 @@ function placeTufts(mesh, px, pz, keep, salt) {
 	mesh.instanceMatrix.needsUpdate = true;
 }
 
-// ---------- rocks ----------
+// ---------- camp and outposts ----------
 
-function rockGeometry() {
-	var geo = new THREE.IcosahedronGeometry(1, 1);
-	var pos = geo.attributes.position;
-	for (var i = 0; i < pos.count; i++) {
-		var x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-		var f = 0.72 + 0.5 * hash(Math.round(x * 20) + Math.round(y * 20) * 3, Math.round(z * 20));
-		pos.setXYZ(i, x * f, y * f, z * f);
-	}
-	geo.computeVertexNormals();
-	return geo;
-}
-
-// land rocks are small. Sea rocks are tall.
-function makeRocks(landSpots, seaSpots) {
-	var rand = makeRandom(10);
-	var mesh = new THREE.InstancedMesh(rockGeometry(), new THREE.MeshLambertMaterial({ color: 0xffffff }), landSpots.length + seaSpots.length);
-	var dummy = new THREE.Object3D();
-	var color = new THREE.Color();
-	for (var i = 0; i < landSpots.length + seaSpots.length; i++) {
-		var sea = i >= landSpots.length;
-		var s = sea ? seaSpots[i - landSpots.length] : landSpots[i];
-		var size = sea ? 3 + rand() * 5 : 0.3 + rand() * rand() * 2.5;
-		dummy.position.set(s.x, s.h + size * (sea ? 0.6 : 0.2), s.z);
-		dummy.rotation.set(rand() * 0.5, rand() * 6.28, rand() * 0.5, 'XYZ');
-		dummy.scale.set(size, size * (sea ? 1.6 + rand() : 0.6 + rand() * 0.5), size * (0.7 + rand() * 0.6));
-		dummy.updateMatrix();
-		mesh.setMatrixAt(i, dummy.matrix);
-		mesh.setColorAt(i, color.setHSL(0.07 + rand() * 0.04, 0.08 + rand() * 0.1, 0.16 + rand() * 0.22));
-	}
-	return mesh;
-}
-
-// ---------- shadows ----------
-
-// a dark soft spot on the ground for each tree. The spot is on the side opposite to the sun.
-function makeShadows(tops, sun, blobTex) {
-	var geo = new THREE.PlaneGeometry(2, 2);
-	geo.rotateX(-Math.PI / 2);
-	var mat = new THREE.MeshBasicMaterial({
-		map: blobTex, color: 0x0a1a10, transparent: true, opacity: 0.5, depthWrite: false,
-		polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
-	});
-	var mesh = new THREE.InstancedMesh(geo, mat, tops.length);
-	var dummy = new THREE.Object3D();
-	var up = new THREE.Vector3(0, 1, 0);
-	var normal = new THREE.Vector3();
-	var flat = Math.sqrt(sun.x * sun.x + sun.z * sun.z);
-	var count = 0;
-	for (var i = 0; i < tops.length; i++) {
-		var t = tops[i];
-		var away = t.tall * 0.8 * flat / sun.y;
-		var x = t.x - sun.x / flat * away, z = t.z - sun.z / flat * away;
-		var h = ground(x, z);
-		if (h < 0.3) {
-			continue;
-		}
-		normal.set(-slopeX(x, z), 1, -slopeZ(x, z)).normalize();
-		dummy.position.set(x, h + 0.12, z);
-		dummy.quaternion.setFromUnitVectors(up, normal);
-		dummy.scale.set(t.r, 1, t.r);
-		dummy.updateMatrix();
-		mesh.setMatrixAt(count, dummy.matrix);
-		count++;
-	}
-	mesh.count = count;
-	return mesh;
-}
-
-// ---------- camp: jetty and huts ----------
-
-// the jetty starts on the west shore of the lagoon and goes east
+// the jetty of the start camp starts on the west shore of the lagoon and goes east
 function findJettyStart() {
-	var x = -160;
-	while (x < 0 && ground(x, LAGOON_Z) > 0.9) {
+	var x = LAGOON_X - 320;
+	while (x < LAGOON_X && ground(x, LAGOON_Z) > 0.9) {
 		x += 1;
 	}
 	return x - 4;
@@ -742,6 +789,7 @@ function makeHut(x, z) {
 	return hut;
 }
 
+// the start camp: a jetty and 2 huts
 function makeCamp(jx) {
 	var camp = new THREE.Group();
 	var wood = new THREE.MeshLambertMaterial({ color: 0x8c6f4e });
@@ -762,13 +810,45 @@ function makeCamp(jx) {
 	return camp;
 }
 
+// an enemy outpost: 3 huts, a watch tower, boxes, and a flag.
+// The flag is red. It becomes blue when the outpost is free (game.js does that).
+function makeOutpost(o) {
+	var post = new THREE.Group();
+	var parts = new THREE.Mesh(boxesGeometry([
+		[0.22, 6.2, 0.22, 4.8, 3.1, -1.2, 0x6b5136], [0.22, 6.2, 0.22, 7.2, 3.1, -1.2, 0x6b5136],     // tower legs
+		[0.22, 6.2, 0.22, 4.8, 3.1, 1.2, 0x6b5136], [0.22, 6.2, 0.22, 7.2, 3.1, 1.2, 0x6b5136],
+		[3.2, 0.2, 3.2, 6, 6.2, 0, 0x8c6f4e],                                                         // tower floor
+		[3.2, 0.9, 0.1, 6, 6.75, -1.55, 0x8c6f4e], [3.2, 0.9, 0.1, 6, 6.75, 1.55, 0x8c6f4e],          // tower walls
+		[0.1, 0.9, 3.2, 4.45, 6.75, 0, 0x8c6f4e], [0.1, 0.9, 3.2, 7.55, 6.75, 0, 0x8c6f4e],
+		[3.8, 0.25, 3.8, 6, 8.6, 0, 0xc9a85e],                                                        // tower roof
+		[0.14, 2.2, 0.14, 4.8, 7.4, -1.2, 0x6b5136], [0.14, 2.2, 0.14, 7.2, 7.4, 1.2, 0x6b5136],
+		[0.14, 2.2, 0.14, 4.8, 7.4, 1.2, 0x6b5136], [0.14, 2.2, 0.14, 7.2, 7.4, -1.2, 0x6b5136],
+		[1.2, 1.2, 1.2, -3, 0.6, 3, 0x7a6a45], [1.2, 1.2, 1.2, -4.4, 0.6, 3.3, 0x5f6b45],             // boxes
+		[1.2, 1.2, 1.2, -3.6, 1.8, 3.1, 0x7a6a45], [2, 1, 1, 2, 0.5, -5, 0x5f6b45],
+		[0.14, 8, 0.14, 0, 4, 0, 0x3a3a3a]                                                            // flag pole
+	]), new THREE.MeshLambertMaterial({ vertexColors: true }));
+	var flag = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.1, 0.04), new THREE.MeshLambertMaterial({ color: 0xc0241c }));
+	flag.position.set(1.02, 7.4, 0);
+	post.add(parts);
+	post.add(flag);
+	post.position.set(o.x, ground(o.x, o.z), o.z);
+	o.flag = flag;
+
+	var both = new THREE.Group();
+	both.add(post);
+	both.add(makeHut(o.x - 12, o.z - 9));
+	both.add(makeHut(o.x + 11, o.z - 11));
+	both.add(makeHut(o.x - 2, o.z + 14));
+	return both;
+}
+
 // ---------- lava ----------
 
 function makeLavaLake(lavaTex) {
 	var geo = new THREE.CircleGeometry(CRATER_R * 0.62, 24);
 	geo.rotateX(-Math.PI / 2);
 	var mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: lavaTex, toneMapped: false }));
-	mesh.position.set(VOLC_X, ground(VOLC_X, VOLC_Z) + 4, VOLC_Z);
+	mesh.position.set(VOLC_X, ground(VOLC_X, VOLC_Z) + 9, VOLC_Z);
 	return mesh;
 }
 
@@ -776,15 +856,15 @@ function makeLavaLake(lavaTex) {
 // Returns { mesh, end }. end is the last point, for the steam.
 function makeLavaRiver(lavaTex) {
 	var angle = 2.2;
-	var x = VOLC_X + Math.cos(angle) * (CRATER_R + 2), z = VOLC_Z + Math.sin(angle) * (CRATER_R + 2);
+	var x = VOLC_X + Math.cos(angle) * (CRATER_R + 4), z = VOLC_Z + Math.sin(angle) * (CRATER_R + 4);
 	var dx = Math.cos(angle), dz = Math.sin(angle);
 	var pos = [], uv = [], idx = [];
 	var rows = 0;
-	for (var i = 0; i < 260; i++) {
+	for (var i = 0; i < 700; i++) {
 		if (ground(x, z) < -0.8) {
 			break;
 		}
-		var w = 1.2 + Math.min(i * 0.02, 1.8);
+		var w = 2.5 + Math.min(i * 0.01, 2.5);
 		for (var k = -1; k <= 1; k++) {
 			var vx = x - dz * w * k, vz = z + dx * w * k;
 			pos.push(vx, ground(vx, vz) + 0.4, vz);
@@ -835,8 +915,9 @@ function makeSky(sun) {
 }
 
 // the water is transparent when you look down, thus the shallow sand shows as turquoise.
-// hidden is a group that the reflection does not show (small objects, for speed).
-function makeWater(sun, hidden) {
+// The reflection is a second render of the scene. For speed, it does not show the world group.
+// It shows the sky, the clouds, and mirrorTerrain: one coarse mesh of all the land.
+function makeWater(sun, world, mirrorTerrain) {
 	var normals = new THREE.TextureLoader().load('waternormals.jpg');
 	normals.wrapS = THREE.RepeatWrapping;
 	normals.wrapT = THREE.RepeatWrapping;
@@ -866,9 +947,11 @@ function makeWater(sun, hidden) {
 	water.material.fragmentShader = fs;
 	var render = water.onBeforeRender;
 	water.onBeforeRender = function (renderer, scene, camera) {
-		hidden.visible = false;
+		world.visible = false;
+		mirrorTerrain.visible = true;
 		render(renderer, scene, camera);
-		hidden.visible = true;
+		world.visible = true;
+		mirrorTerrain.visible = false;
 	};
 	return water;
 }
@@ -881,9 +964,9 @@ function makeClouds(textures, count) {
 	for (var i = 0; i < count; i++) {
 		var mat = new THREE.SpriteMaterial({ map: textures[i % textures.length], color: 0xfff7ee, transparent: true, depthWrite: false, opacity: 0.92, fog: false, toneMapped: false });
 		var s = new THREE.Sprite(mat);
-		var a = rand() * Math.PI * 2, r = 600 + rand() * 3200;
-		var w = 300 + rand() * 450 + r * 0.15;
-		s.position.set(Math.cos(a) * r, 320 + rand() * 260, Math.sin(a) * r);
+		var a = rand() * Math.PI * 2, r = 400 + Math.sqrt(rand()) * 6000;
+		var w = 500 + rand() * 700 + r * 0.12;
+		s.position.set(Math.cos(a) * r, 620 + rand() * 380, Math.sin(a) * r);
 		s.scale.set(w, w * 0.5, 1);
 		group.add(s);
 	}
@@ -894,8 +977,8 @@ function moveClouds(clouds, dt) {
 	for (var i = 0; i < clouds.children.length; i++) {
 		var p = clouds.children[i].position;
 		p.x += 6 * dt;
-		if (p.x > 3800) {
-			p.x = -3800;
+		if (p.x > 6400) {
+			p.x = -6400;
 		}
 	}
 }
@@ -944,13 +1027,13 @@ function makeBirds(count) {
 	return birds;
 }
 
-// the birds fly in circles above the lagoon
-function moveBirds(birds, time) {
+// the birds fly in circles above (cx, cz)
+function moveBirds(birds, time, cx, cz) {
 	for (var i = 0; i < birds.children.length; i++) {
 		var bird = birds.children[i];
 		var radius = 30 + i * 9;
 		var a = time * (0.32 - i * 0.015) + i * 2.4;
-		bird.position.set(LAGOON_X + Math.cos(a) * radius, 16 + i * 2 + Math.sin(time * 0.4 + i) * 3, LAGOON_Z + Math.sin(a) * radius);
+		bird.position.set(cx + Math.cos(a) * radius, ground(cx, cz) + 22 + i * 2 + Math.sin(time * 0.4 + i) * 3, cz + Math.sin(a) * radius);
 		bird.rotation.y = -a;
 		var flap = Math.sin(time * 7 + i * 1.7) * 0.55;
 		bird.children[0].rotation.z = flap;
@@ -1022,24 +1105,39 @@ function readKeys(keys) {
 	return out;
 }
 
+// desktop: move the finger on the trackpad (or move the mouse) to look. No press is necessary.
+// A click fires the gun. The first click also locks the pointer to the page, thus it cannot go off the window.
+// Esc releases the pointer.
 function setupDesktopInput(canvas, keys, player, camera, renderer) {
-	window.addEventListener('keydown', function (e) { keys[e.code] = true; });
+	window.addEventListener('keydown', function (e) {
+		keys[e.code] = true;
+		if (e.code === 'Space') {
+			e.preventDefault();
+		}
+	});
 	window.addEventListener('keyup', function (e) { keys[e.code] = false; });
-	canvas.addEventListener('pointermove', function (e) {
-		if (e.buttons !== 1 || renderer.xr.isPresenting) {
+	window.addEventListener('pointermove', function (e) {
+		if (renderer.xr.isPresenting) {
 			return;
 		}
-		player.rotation.y -= e.movementX * 0.004;
-		camera.rotation.x = clamp(camera.rotation.x - e.movementY * 0.004, -1.4, 1.4);
+		player.rotation.y -= e.movementX * 0.003;
+		camera.rotation.x = clamp(camera.rotation.x - e.movementY * 0.003, -1.4, 1.4);
 	});
+	canvas.addEventListener('pointerdown', function () {
+		keys.Mouse = true;
+		if (!renderer.xr.isPresenting && canvas.requestPointerLock) {
+			canvas.requestPointerLock();
+		}
+	});
+	window.addEventListener('pointerup', function () { keys.Mouse = false; });
 }
 
 // ---------- player ----------
 
 var snapReady = true;
 
-function movePlayer(player, camera, input, dt, jx) {
-	// snap turn
+// snap turn with the right stick
+function turnPlayer(player, input) {
 	if (Math.abs(input.turn) < 0.3) {
 		snapReady = true;
 	}
@@ -1047,7 +1145,10 @@ function movePlayer(player, camera, input, dt, jx) {
 		player.rotation.y -= Math.sign(input.turn) * SNAP_ANGLE;
 		snapReady = false;
 	}
+}
 
+// walk, or swim in deep water
+function movePlayer(player, camera, input, dt, jx) {
 	// move in the direction of the head, on the horizontal plane
 	var dir = new THREE.Vector3();
 	camera.getWorldDirection(dir);
@@ -1056,8 +1157,9 @@ function movePlayer(player, camera, input, dt, jx) {
 	var mx = Math.abs(input.mx) > 0.15 ? input.mx : 0;
 	var mz = Math.abs(input.mz) > 0.15 ? input.mz : 0;
 	var p = player.position;
-	p.x += (-dir.x * mz - dir.z * mx) * WALK_SPEED * dt;
-	p.z += (-dir.z * mz + dir.x * mx) * WALK_SPEED * dt;
+	var speed = ground(p.x, p.z) < -1.2 ? SWIM_SPEED : WALK_SPEED;
+	p.x += (-dir.x * mz - dir.z * mx) * speed * dt;
+	p.z += (-dir.z * mz + dir.x * mx) * speed * dt;
 
 	// stay on the terrain square
 	p.x = clamp(p.x, -SIZE / 2 + 10, SIZE / 2 - 10);
@@ -1120,22 +1222,35 @@ function main() {
 	document.body.appendChild(renderer.domElement);
 
 	var scene = new THREE.Scene();
-	scene.fog = new THREE.FogExp2(FOG_COLOR, 0.00075);
+	scene.fog = new THREE.FogExp2(FOG_COLOR, 0.00055);
 	var camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 20000);
 	camera.rotation.order = 'YXZ';
 	camera.position.set(0, EYE_H, 0);
 
+	// the shape of the land (world.js): heights, camp, outposts, roads, open sea
+	console.time('island: land');
 	fillHeights();
+	flatten(findJettyStart() - 34, LAGOON_Z, 46);   // level ground for the start camp
 	var jx = findJettyStart();
+	var camp = { x: jx - 16, z: LAGOON_Z };
+	var outposts = findOutposts(camp.x, camp.z);
+	for (var o = 0; o < outposts.length; o++) {
+		flatten(outposts[o].x, outposts[o].z, 50);
+		outposts[o].y = ground(outposts[o].x, outposts[o].z);
+	}
+	makeRoads([camp].concat(outposts));
+	fillSea();
+	fillColors();
+	console.timeEnd('island: land');
 
 	// the player is a group. The stick moves the group. The headset moves the camera in the group.
-	// Start on the beach near the jetty, with the face to the volcano.
+	// Start in the camp, with the face to the jetty and the lagoon.
 	// For tests, the URL can set the start: ?x=100&z=50&yaw=90&pitch=-20
 	var query = new URLSearchParams(window.location.search);
 	var player = new THREE.Group();
 	player.add(camera);
 	player.position.set(jx - 26, 0, LAGOON_Z + 2);
-	player.rotation.y = Math.atan2(player.position.x - VOLC_X, player.position.z - VOLC_Z);
+	player.rotation.y = Math.atan2(player.position.x - (jx + 30), player.position.z - (LAGOON_Z - 12));
 	var start = { x: player.position.x, z: player.position.z, yaw: player.rotation.y };
 	if (query.has('x')) {
 		player.position.set(Number(query.get('x')), 0, Number(query.get('z')));
@@ -1154,69 +1269,61 @@ function main() {
 	var puffs = [makePuffTexture(3), makePuffTexture(4), makePuffTexture(6)];
 	var lavaTex = makeLavaTexture();
 	var lakeTex = makeLavaTexture();
-	lavaTex.repeat.set(1, 1);
-	lakeTex.repeat.set(3, 3);
+	lakeTex.repeat.set(5, 5);
+	var terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: makeDetailTexture(renderer) });
+	var assets = makeAssets(makeFrondTexture(), makeLeavesTexture(), makeBlobTexture());
 
-	// locations for the plants and rocks. The camp area stays clear.
+	// plants do not grow on roads, in the camp, or in the outposts
 	function clear(x, z) {
-		var dx = x - (jx - 14), dz = z - LAGOON_Z;
-		return dx * dx + dz * dz > 30 * 30;
+		var ok = roadAt(x, z) < 0.15 && (x - camp.x) * (x - camp.x) + (z - camp.z) * (z - camp.z) > 32 * 32;
+		for (var i = 0; i < outposts.length; i++) {
+			ok = ok && (x - outposts[i].x) * (x - outposts[i].x) + (z - outposts[i].z) * (z - outposts[i].z) > 40 * 40;
+		}
+		return ok;
 	}
-	var palmSpots = scatter(170, 1, function (x, z, h) {
-		return h > 1.5 && h < 9 && slopeAt(x, z) < 0.4 && clear(x, z);
-	});
-	var treeSpots = scatter(230, 2, function (x, z, h) {
-		return h > 5 && h < 62 && slopeAt(x, z) < 0.55 && fbm(x * 0.012 + 9, z * 0.012) > 0.4 && clear(x, z);
-	});
-	var bushSpots = scatter(520, 3, function (x, z, h) {
-		return h > 2.8 && h < 75 && slopeAt(x, z) < 0.7 && clear(x, z);
-	});
-	var rockSpots = scatter(260, 4, function (x, z, h) {
-		return h > -1.5 && (slopeAt(x, z) > 0.3 || h < 1.5 || h > 60) && clear(x, z);
-	});
-	var seaRockSpots = scatter(12, 5, function (x, z, h) {
-		return h > -6.5 && h < -3;
-	});
 
-	// world: the reflection in the water shows these objects
+	// world: all the detailed objects. The reflection in the water does not show this group.
+	var world = new THREE.Group();
+	console.time('island: pieces');
+	var chunks = makeChunks(world, terrainMat, assets, sun, clear);
+	console.timeEnd('island: pieces');
 	var lavaRiver = makeLavaRiver(lavaTex);
-	var palms = makePalms(palmSpots, makeFrondTexture());
-	var clouds = makeClouds(puffs, 34);
-	var craterY = ground(VOLC_X, VOLC_Z);
-	var smoke = makePlume(puffs[0], 14, 0x77706a, VOLC_X, craterY + 12, VOLC_Z);
 	var lake = makeLavaLake(lakeTex);
-	scene.add(makeSky(sun));
-	scene.add(makeSeaFloor());
-	scene.add(makeTerrain(makeDetailTexture(renderer)));
-	scene.add(palms.mesh);
-	scene.add(clouds);
-	scene.add(smoke);
-	scene.add(lake);
-	scene.add(lavaRiver.mesh);
-
-	// detail: the reflection does not show these objects
-	var jungle = makeJungle(treeSpots, bushSpots, makeLeavesTexture());
 	var grass = makeTufts(makeGrassTexture(), 1.2, 0.8);
 	var flowers = makeTufts(makeFlowerTexture(), 0.9, 0.7);
 	var birds = makeBirds(9);
 	var steam = makePlume(puffs[1], 8, 0xffffff, lavaRiver.end.x, 1, lavaRiver.end.z);
-	var detail = new THREE.Group();
-	detail.add(jungle.mesh);
-	detail.add(makeRocks(rockSpots, seaRockSpots));
-	detail.add(makeShadows(palms.tops.concat(jungle.tops), sun, makeBlobTexture()));
-	detail.add(makeCamp(jx));
-	detail.add(grass);
-	detail.add(flowers);
-	detail.add(birds);
-	detail.add(steam);
-	scene.add(detail);
+	world.add(lavaRiver.mesh);
+	world.add(lake);
+	world.add(makeCamp(jx));
+	for (var k = 0; k < outposts.length; k++) {
+		world.add(makeOutpost(outposts[k]));
+	}
+	world.add(grass);
+	world.add(flowers);
+	world.add(birds);
+	world.add(steam);
+	scene.add(world);
 
-	// guns and enemies (game.js). window.game lets you look at the state in the console.
-	var game = makeGame(scene, player, camera, renderer, detail, puffs[1], start);
-	window.game = game;
-
-	var water = makeWater(sun, detail);
+	// the reflection shows these objects
+	var mirrorTerrain = new THREE.Mesh(patchGeometry(0, 0, GRID, 5, 0), new THREE.MeshLambertMaterial({ vertexColors: true }));
+	mirrorTerrain.visible = false;
+	var clouds = makeClouds(puffs, 60);
+	var smoke = makePlume(puffs[0], 14, 0x77706a, VOLC_X, ground(VOLC_X, VOLC_Z) + 30, VOLC_Z);
+	var water = makeWater(sun, world, mirrorTerrain);
+	scene.add(makeSky(sun));
+	scene.add(makeSeaFloor());
+	scene.add(mirrorTerrain);
+	scene.add(clouds);
+	scene.add(smoke);
 	scene.add(water);
+
+	// guns and enemies (game.js), jeeps and boats (vehicles.js).
+	// window.game lets you look at the state in the console.
+	var game = makeGame(scene, player, camera, renderer, world, puffs[1], start, outposts);
+	var rides = makeRides(game, world, camp, jx, outposts);
+	window.game = game;
+	window.rides = rides;
 
 	var keys = {};
 	setupDesktopInput(renderer.domElement, keys, player, camera, renderer);
@@ -1234,27 +1341,44 @@ function main() {
 
 	var clock = new THREE.Clock();
 	var grassX = 1e9, grassZ = 1e9;   // where the grass was put the last time
+	var grassWait = 0, chunkWait = 0;
 	renderer.setAnimationLoop(function () {
 		var dt = Math.min(clock.getDelta(), 0.1);
 		var time = clock.elapsedTime;
 		var session = renderer.xr.getSession();
 		var input = session ? readSticks(session) : readKeys(keys);
-		movePlayer(player, camera, input, dt, jx);
+		var p = player.position;
+
+		turnPlayer(player, input);
+		if (rides.current) {
+			driveRide(game, rides, input, dt);
+		} else {
+			movePlayer(player, camera, input, dt, jx);
+		}
+		updateRides(game, rides, keys, dt);
 		updateGame(game, dt, keys);
 
-		// put the grass around the player again after 3 m of movement
-		var p = player.position;
-		if (Math.abs(p.x - grassX) > 3 || Math.abs(p.z - grassZ) > 3) {
+		// select the fine or coarse terrain pieces, 4 times each second
+		chunkWait -= dt;
+		if (chunkWait <= 0) {
+			chunkWait = 0.25;
+			showChunks(chunks, p.x, p.z);
+		}
+
+		// put the grass around the player again after 3 m of movement, but not more than 3 times each second
+		grassWait -= dt;
+		if (grassWait <= 0 && (Math.abs(p.x - grassX) > 3 || Math.abs(p.z - grassZ) > 3)) {
 			grassX = p.x;
 			grassZ = p.z;
+			grassWait = 0.33;
 			placeTufts(grass, p.x, p.z, 0.8, 0);
 			placeTufts(flowers, p.x, p.z, 0.05, 50);
 		}
 
 		moveClouds(clouds, dt);
-		movePlume(smoke, time, 190, 110, 120, 0.8);
-		movePlume(steam, time * 2.5, 45, 20, 30, 0.6);
-		moveBirds(birds, time);
+		movePlume(smoke, time, 520, 330, 330, 0.8);
+		movePlume(steam, time * 2.5, 60, 25, 45, 0.6);
+		moveBirds(birds, time, p.x, p.z);
 		lavaTex.offset.y = time * 0.12;
 		lakeTex.offset.x = time * 0.01;
 		lake.material.color.setScalar(0.85 + 0.15 * Math.sin(time * 1.5));
