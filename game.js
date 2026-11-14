@@ -10,7 +10,7 @@
 // ---------- constants ----------
 
 var GUARDS = 5;               // enemies at each outpost
-var ROAMERS = 8;              // enemies that walk around on the islands
+var ROAMERS = 24;              // enemies that walk around on the islands
 var ENEMY_FAR = 450;         // m, enemies farther than this are not shown and do not move
 var ENEMY_SEE = 55;          // m, an enemy sees you at this distance
 var ENEMY_HEAR = 140;        // m, an enemy hears your shots at this distance
@@ -27,6 +27,9 @@ var audio = { ac: null, shot: null };
 function getAudio() {
 	var AC = window.AudioContext || window.webkitAudioContext;
 	if (audio.ac || !AC) {
+		if (audio.ac && audio.ac.state === 'suspended') {
+			audio.ac.resume();
+		}
 		return audio.ac;
 	}
 	var ac = new AC();
@@ -447,7 +450,7 @@ function nearestOutpost(game) {
 // a random location on land, not near the player
 function findSpawn(player) {
 	for (var i = 0; i < 400; i++) {
-		var x = (Math.random() - 0.5) * 3700, z = (Math.random() - 0.5) * 3700;
+		var x = (Math.random() - 0.5) * (SIZE - 300), z = (Math.random() - 0.5) * (SIZE - 300);
 		var h = ground(x, z);
 		var dx = x - player.position.x, dz = z - player.position.z;
 		if (h > 2 && h < 60 && slopeAt(x, z) < 0.5 && dx * dx + dz * dz > 150 * 150) {
@@ -619,8 +622,10 @@ function updateEnemy(game, e, eye, dt) {
 			e.timer = 1.2 + Math.random() * 1.6;
 			e.side = -e.side;
 			var chest = new THREE.Vector3(e.x, e.y + 1.4, e.z);
-			if (dist < 110 && clearLine(chest, eye)) {
-				enemyShoot(game, e, eye, dist);
+			// the distance for the shot includes the height (the player can be in the air)
+			var range = Math.sqrt(dist * dist + (eye.y - chest.y) * (eye.y - chest.y));
+			if (range < 110 && clearLine(chest, eye)) {
+				enemyShoot(game, e, eye, range);
 			}
 		}
 		if (dist > 200) {

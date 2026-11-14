@@ -2,9 +2,9 @@
 // Classic script. Global THREE. Units are meters.
 //
 // The files:
-//   world.js     the shape of the land: heights, outposts, roads
+//   world.js     the shape of the land (8 km x 8 km): heights, outposts, roads
 //   game.js      guns, enemies, outposts, HUD
-//   vehicles.js  jeeps and boats
+//   vehicles.js  jeeps, boats, helicopters, delta wings, parachute
 //   main.js      this file: all the graphics of the world, the input, the main loop
 //
 // Order of this file:
@@ -26,6 +26,9 @@ var CHUNK = 25;          // grid cells on each side of a terrain piece (200 m)
 var FINE_DIST = 700;     // m, terrain pieces nearer than this show all grid points
 var TREE_DIST = 800;     // m, trees and palms are visible to this distance
 var SMALL_DIST = 260;    // m, bushes and rocks are visible to this distance
+var BUILD_DIST = 950;    // m, a terrain piece nearer than this gets its fine mesh and its plants
+var DROP_DIST = 1500;    // m, a terrain piece farther than this loses them again (to free memory)
+var FAR_DIST = 5000;     // m, coarse terrain pieces are visible to this distance
 
 // ---------- colors ----------
 
@@ -44,11 +47,14 @@ var COLOR = new Float32Array((GRID + 1) * (GRID + 1) * 3);
 var NORMAL = new Float32Array((GRID + 1) * (GRID + 1) * 3);
 
 function groundColor(x, z, h, slope, road, pal) {
+	if (h < -8.3) {
+		return pal.seaDeep;   // deep sea: no more calculation (this makes the load fast)
+	}
 	var n = fbm(x * 0.02, z * 0.02);
 	var n2 = fbm(x * 0.08 + 3, z * 0.08 + 7);
 	var n3 = fbm(x * 0.004 + 31, z * 0.004 + 17);   // large areas: jungle or dry grass
 	var dx = x - VOLC_X, dz = z - VOLC_Z;
-	var nearVolc = clamp(1 - Math.sqrt(dx * dx + dz * dz) / 800, 0, 1);
+	var nearVolc = clamp(1 - Math.sqrt(dx * dx + dz * dz) / 1200, 0, 1);
 
 	var sand = mix3(pal.sand, pal.blackSand, smooth(clamp((nearVolc - 0.2) / 0.25, 0, 1)));
 	sand = mix3(sand, mix3(sand, [0, 0, 0], 0.35), clamp(1 - h / 0.7, 0, 1));   // wet sand
@@ -148,11 +154,11 @@ function patchGeometry(i0, j0, cells, step, skirt) {
 	return geo;
 }
 
-// make all terrain pieces, with their plants. Pieces that are only deep sea are not made.
-// clear(x, z) is true where plants can grow.
-function makeChunks(parent, terrainMat, assets, sun, clear) {
+// make the list of terrain pieces. Each piece gets its coarse mesh now.
+// The fine mesh and the plants are made later, when the player comes near (buildChunk).
+// Pieces that are only deep sea are not made.
+function makeChunks(parent, terrainMat) {
 	var chunks = [];
-	var counts = { pieces: 0, palms: 0, trees: 0, bushes: 0, rocks: 0 };
 	for (var cz = 0; cz < GRID / CHUNK; cz++) {
 		for (var cx = 0; cx < GRID / CHUNK; cx++) {
 			var i0 = cx * CHUNK, j0 = cz * CHUNK;
@@ -167,38 +173,74 @@ function makeChunks(parent, terrainMat, assets, sun, clear) {
 			}
 			var chunk = {
 				x: (i0 + CHUNK / 2) * CELL - SIZE / 2, z: (j0 + CHUNK / 2) * CELL - SIZE / 2,
-				fine: new THREE.Mesh(patchGeometry(i0, j0, CHUNK, 1, 6), terrainMat),
+				cx: cx, cz: cz, i0: i0, j0: j0, land: top > 1,
 				coarse: new THREE.Mesh(patchGeometry(i0, j0, CHUNK, 5, 30), terrainMat),
-				trees: new THREE.Group(), small: new THREE.Group()
+				fine: null, trees: null, small: null
 			};
-			if (top > 1) {
-				makeChunkPlants(chunk, cx, cz, assets, sun, clear, counts);
-			}
-			parent.add(chunk.fine);
 			parent.add(chunk.coarse);
-			parent.add(chunk.trees);
-			parent.add(chunk.small);
 			chunks.push(chunk);
-			counts.pieces++;
 		}
 	}
-	console.log('island:', JSON.stringify(counts));
 	return chunks;
 }
 
-// show the fine or the coarse mesh of each piece, and show the plants of the near pieces
-function showChunks(chunks, px, pz) {
+// make the fine mesh and the plants of one piece. kit has the shared things: { terrainMat, assets, sun, clear, counts }.
+function buildChunk(c, parent, kit) {
+	c.fine = new THREE.Mesh(patchGeometry(c.i0, c.j0, CHUNK, 1, 6), kit.terrainMat);
+	c.trees = new THREE.Group();
+	c.small = new THREE.Group();
+	if (c.land) {
+		makeChunkPlants(c, c.cx, c.cz, kit.assets, kit.sun, kit.clear, kit.counts);
+	}
+	parent.add(c.fine);
+	parent.add(c.trees);
+	parent.add(c.small);
+}
+
+// remove the fine mesh and the plants of a piece that is far, to free memory
+function dropChunk(c, parent) {
+	function free(o) {
+		if (o.isInstancedMesh) {
+			o.dispose();
+		}
+	}
+	c.trees.traverse(free);
+	c.small.traverse(free);
+	c.fine.geometry.dispose();
+	parent.remove(c.fine);
+	parent.remove(c.trees);
+	parent.remove(c.small);
+	c.fine = null;
+	c.trees = null;
+	c.small = null;
+}
+
+// for each piece: make it when the player comes near, remove it when the player is far,
+// and show the fine or the coarse mesh and the plants.
+// limit = the largest number of pieces to make in this call (1 during the game, thus no long stop).
+function showChunks(chunks, px, pz, parent, kit, limit) {
+	var built = 0;
 	for (var i = 0; i < chunks.length; i++) {
 		var c = chunks[i];
 		var d = Math.sqrt((c.x - px) * (c.x - px) + (c.z - pz) * (c.z - pz));
-		c.fine.visible = d < FINE_DIST;
-		c.coarse.visible = d >= FINE_DIST;
-		c.trees.visible = d < TREE_DIST;
-		c.small.visible = d < SMALL_DIST;
+		if (!c.fine && d < BUILD_DIST && built < limit) {
+			buildChunk(c, parent, kit);
+			built++;
+		}
+		if (c.fine && d > DROP_DIST) {
+			dropChunk(c, parent);
+		}
+		var fine = c.fine !== null && d < FINE_DIST;
+		c.coarse.visible = !fine && d < FAR_DIST;
+		if (c.fine) {
+			c.fine.visible = fine;
+			c.trees.visible = d < TREE_DIST;
+			c.small.visible = d < SMALL_DIST;
+		}
 	}
 }
 
-// a flat floor below the sea, for the area out of the terrain square
+// a flat floor below the sea, for the deep sea. It follows the player.
 function makeSeaFloor() {
 	var geo = new THREE.PlaneGeometry(12000, 12000);
 	geo.rotateX(-Math.PI / 2);
@@ -860,7 +902,7 @@ function makeLavaRiver(lavaTex) {
 	var dx = Math.cos(angle), dz = Math.sin(angle);
 	var pos = [], uv = [], idx = [];
 	var rows = 0;
-	for (var i = 0; i < 700; i++) {
+	for (var i = 0; i < 1000; i++) {
 		if (ground(x, z) < -0.8) {
 			break;
 		}
@@ -964,22 +1006,24 @@ function makeClouds(textures, count) {
 	for (var i = 0; i < count; i++) {
 		var mat = new THREE.SpriteMaterial({ map: textures[i % textures.length], color: 0xfff7ee, transparent: true, depthWrite: false, opacity: 0.92, fog: false, toneMapped: false });
 		var s = new THREE.Sprite(mat);
-		var a = rand() * Math.PI * 2, r = 400 + Math.sqrt(rand()) * 6000;
-		var w = 500 + rand() * 700 + r * 0.12;
-		s.position.set(Math.cos(a) * r, 620 + rand() * 380, Math.sin(a) * r);
+				var w = 600 + rand() * 1100;
+		s.position.set((rand() - 0.5) * 12800, 800 + rand() * 500, (rand() - 0.5) * 12800);
 		s.scale.set(w, w * 0.5, 1);
 		group.add(s);
 	}
 	return group;
 }
 
-function moveClouds(clouds, dt) {
+// the clouds move with the wind. A cloud that is far from the player goes to the opposite side,
+// thus there are always clouds around the player.
+function moveClouds(clouds, dt, px, pz) {
 	for (var i = 0; i < clouds.children.length; i++) {
 		var p = clouds.children[i].position;
 		p.x += 6 * dt;
-		if (p.x > 6400) {
-			p.x = -6400;
-		}
+		if (p.x - px > 6400) { p.x -= 12800; }
+		if (p.x - px < -6400) { p.x += 12800; }
+		if (p.z - pz > 6400) { p.z -= 12800; }
+		if (p.z - pz < -6400) { p.z += 12800; }
 	}
 }
 
@@ -1078,8 +1122,9 @@ function startSea() {
 // ---------- input ----------
 
 // thumbsticks of the Quest controllers (xr-standard mapping: axes 2 and 3)
+// The right stick up and down is for the helicopter.
 function readSticks(session) {
-	var out = { mx: 0, mz: 0, turn: 0 };
+	var out = { mx: 0, mz: 0, turn: 0, up: 0 };
 	for (var i = 0; i < session.inputSources.length; i++) {
 		var src = session.inputSources[i];
 		if (!src.gamepad || src.gamepad.axes.length < 4) {
@@ -1091,17 +1136,20 @@ function readSticks(session) {
 		}
 		if (src.handedness === 'right') {
 			out.turn = src.gamepad.axes[2];
+			out.up = -src.gamepad.axes[3];
 		}
 	}
 	return out;
 }
 
 function readKeys(keys) {
-	var out = { mx: 0, mz: 0, turn: 0 };
+	var out = { mx: 0, mz: 0, turn: 0, up: 0 };
 	if (keys.KeyW || keys.ArrowUp) { out.mz -= 1; }
 	if (keys.KeyS || keys.ArrowDown) { out.mz += 1; }
 	if (keys.KeyA || keys.ArrowLeft) { out.mx -= 1; }
 	if (keys.KeyD || keys.ArrowRight) { out.mx += 1; }
+	if (keys.KeyR) { out.up += 1; }
+	if (keys.KeyF) { out.up -= 1; }
 	return out;
 }
 
@@ -1244,7 +1292,8 @@ function main() {
 	console.timeEnd('island: land');
 
 	// the player is a group. The stick moves the group. The headset moves the camera in the group.
-	// Start in the camp, with the face to the jetty and the lagoon.
+	// This is the position of the start camp. The game starts in the air (see startFlight in vehicles.js),
+	// but the URL can set a start on the ground.
 	// For tests, the URL can set the start: ?x=100&z=50&yaw=90&pitch=-20
 	var query = new URLSearchParams(window.location.search);
 	var player = new THREE.Group();
@@ -1284,9 +1333,9 @@ function main() {
 
 	// world: all the detailed objects. The reflection in the water does not show this group.
 	var world = new THREE.Group();
-	console.time('island: pieces');
-	var chunks = makeChunks(world, terrainMat, assets, sun, clear);
-	console.timeEnd('island: pieces');
+	var chunks = makeChunks(world, terrainMat);
+	var kit = { terrainMat: terrainMat, assets: assets, sun: sun, clear: clear, counts: { palms: 0, trees: 0, bushes: 0, rocks: 0 } };
+	showChunks(chunks, player.position.x, player.position.z, world, kit, 999);   // all pieces near the start
 	var lavaRiver = makeLavaRiver(lavaTex);
 	var lake = makeLavaLake(lakeTex);
 	var grass = makeTufts(makeGrassTexture(), 1.2, 0.8);
@@ -1306,13 +1355,15 @@ function main() {
 	scene.add(world);
 
 	// the reflection shows these objects
-	var mirrorTerrain = new THREE.Mesh(patchGeometry(0, 0, GRID, 5, 0), new THREE.MeshLambertMaterial({ vertexColors: true }));
+	var mirrorTerrain = new THREE.Mesh(patchGeometry(0, 0, GRID, 10, 0), new THREE.MeshLambertMaterial({ vertexColors: true }));
 	mirrorTerrain.visible = false;
-	var clouds = makeClouds(puffs, 60);
+	var clouds = makeClouds(puffs, 70);
 	var smoke = makePlume(puffs[0], 14, 0x77706a, VOLC_X, ground(VOLC_X, VOLC_Z) + 30, VOLC_Z);
 	var water = makeWater(sun, world, mirrorTerrain);
-	scene.add(makeSky(sun));
-	scene.add(makeSeaFloor());
+	var sky = makeSky(sun);
+	var seaFloor = makeSeaFloor();
+	scene.add(sky);
+	scene.add(seaFloor);
 	scene.add(mirrorTerrain);
 	scene.add(clouds);
 	scene.add(smoke);
@@ -1322,8 +1373,12 @@ function main() {
 	// window.game lets you look at the state in the console.
 	var game = makeGame(scene, player, camera, renderer, world, puffs[1], start, outposts);
 	var rides = makeRides(game, world, camp, jx, outposts);
+	if (!query.has('x')) {
+		startFlight(game, rides);   // the game starts on a delta wing, high above the main island
+	}
 	window.game = game;
 	window.rides = rides;
+	window.view = { renderer: renderer, chunks: chunks, world: world, kit: kit };
 
 	var keys = {};
 	setupDesktopInput(renderer.domElement, keys, player, camera, renderer);
@@ -1342,6 +1397,7 @@ function main() {
 	var clock = new THREE.Clock();
 	var grassX = 1e9, grassZ = 1e9;   // where the grass was put the last time
 	var grassWait = 0, chunkWait = 0;
+	var chunkX = player.position.x, chunkZ = player.position.z;   // where the player was at the last terrain update
 	renderer.setAnimationLoop(function () {
 		var dt = Math.min(clock.getDelta(), 0.1);
 		var time = clock.elapsedTime;
@@ -1352,17 +1408,23 @@ function main() {
 		turnPlayer(player, input);
 		if (rides.current) {
 			driveRide(game, rides, input, dt);
+		} else if (rides.fall) {
+			fallPlayer(game, rides, input, dt);
 		} else {
 			movePlayer(player, camera, input, dt, jx);
 		}
 		updateRides(game, rides, keys, dt);
 		updateGame(game, dt, keys);
 
-		// select the fine or coarse terrain pieces, 4 times each second
+		// make, remove and select the terrain pieces, 4 times each second
 		chunkWait -= dt;
 		if (chunkWait <= 0) {
 			chunkWait = 0.25;
-			showChunks(chunks, p.x, p.z);
+			// after a jump (the player died and is back at the camp), make all near pieces at once
+			var jump = Math.abs(p.x - chunkX) + Math.abs(p.z - chunkZ) > 300;
+			chunkX = p.x;
+			chunkZ = p.z;
+			showChunks(chunks, p.x, p.z, world, kit, jump ? 999 : 1);
 		}
 
 		// put the grass around the player again after 3 m of movement, but not more than 3 times each second
@@ -1375,8 +1437,13 @@ function main() {
 			placeTufts(flowers, p.x, p.z, 0.05, 50);
 		}
 
-		moveClouds(clouds, dt);
-		movePlume(smoke, time, 520, 330, 330, 0.8);
+		moveClouds(clouds, dt, p.x, p.z);
+
+		// the sky, the sea and the sea floor are always around the player
+		sky.position.set(p.x, 0, p.z);
+		seaFloor.position.set(p.x, -9, p.z);
+		water.position.set(p.x, 0, p.z);
+		movePlume(smoke, time, 800, 500, 480, 0.8);
 		movePlume(steam, time * 2.5, 60, 25, 45, 0.6);
 		moveBirds(birds, time, p.x, p.z);
 		lavaTex.offset.y = time * 0.12;

@@ -6,25 +6,27 @@
 
 // ---------- constants ----------
 
-var SIZE = 4000;         // side of the terrain square
-var GRID = 500;          // cells on each side (8 m cells)
+var SIZE = 8000;         // side of the terrain square
+var GRID = 1000;         // cells on each side (8 m cells)
 var CELL = SIZE / GRID;
-var VOLC_X = 300;        // volcano center
-var VOLC_Z = -380;
-var VOLC_R = 560;        // radius of the volcano base
-var VOLC_H = 400;        // height of the cone before the crater cut
-var CRATER_R = 70;
-var CRATER_DEPTH = 60;
-var LAGOON_X = -120;     // the bay at the start camp
-var LAGOON_Z = 800;
+var VOLC_X = 450;        // volcano center
+var VOLC_Z = -550;
+var VOLC_R = 800;        // radius of the volcano base
+var VOLC_H = 600;        // height of the cone before the crater cut
+var CRATER_R = 100;
+var CRATER_DEPTH = 80;
+var LAGOON_X = -150;     // the bay at the start camp
+var LAGOON_Z = 1150;
 var JETTY_LEN = 30;
 var JETTY_Y = 0.7;
 // islands: x, z, radius, height of the base. The first island is the main island.
 var ISLANDS = [
-	[0, 0, 1050, 46], [1300, -1050, 480, 34], [-1380, 980, 430, 30], [1420, 700, 330, 26],
-	[-1300, -1150, 300, 24], [350, 1560, 200, 18], [-600, -1600, 170, 16], [700, -1650, 150, 14]
+	[0, 0, 1500, 56], [2600, -2100, 800, 40], [-2700, 1900, 750, 38], [2800, 1500, 600, 32],
+	[-2600, -2300, 560, 30], [300, 3100, 420, 24], [-1100, -3200, 380, 22], [1500, -3300, 300, 18],
+	[-3300, -200, 340, 22], [3400, -300, 300, 18], [1400, 3000, 260, 16], [-1500, 3200, 240, 16],
+	[3300, 3200, 280, 18], [-3400, 3300, 220, 14]
 ];
-var OUTPOSTS_ON = [4, 1, 1, 1, 1, 0, 0, 0];   // number of enemy outposts on each island
+var OUTPOSTS_ON = [6, 2, 2, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0];   // number of enemy outposts on each island
 
 // ---------- math ----------
 
@@ -75,6 +77,15 @@ function makeRandom(seed) {
 
 // height from the formula. Used one time, to fill the grid.
 function height(x, z) {
+	// far from all islands: deep sea. No more calculation is necessary (this makes the load fast).
+	var near = false;
+	for (var e = 0; e < ISLANDS.length; e++) {
+		var ex = x - ISLANDS[e][0], ez = z - ISLANDS[e][1], er = ISLANDS[e][2] * 1.62;
+		near = near || ex * ex + ez * ez < er * er;
+	}
+	if (!near) {
+		return -8.4;
+	}
 	var n = fbm(x * 0.0018 + 5, z * 0.0018 + 5);      // shape of the coast
 	var c = fbm(x * 0.006 + 11, z * 0.006 + 3);       // bays and capes
 	var k = fbm(x * 0.0035 + 70, z * 0.0035 + 20);    // hills and valleys
@@ -87,7 +98,9 @@ function height(x, z) {
 	}
 	var inland = clamp(h / 20, 0, 1);
 	h += inland * inland * (k - 0.38) * 230;
-	h += 170 * bump(x, z, -560, 40, 260) * (0.4 + m);     // west mountains
+	h += 260 * bump(x, z, -850, 100, 420) * (0.4 + m);    // west mountains of the main island
+	h += 200 * bump(x, z, 2650, -2150, 320) * (0.4 + m);  // mountain on the north-east island
+	h += 150 * bump(x, z, -2750, 1850, 300) * (0.4 + m);  // mountain on the south-west island
 	h -= 30 * bump(x, z, LAGOON_X, LAGOON_Z, 150);        // lagoon
 	for (var q = 1; q <= 6; q++) {                        // channel from the lagoon to the sea
 		h -= 24 * bump(x, z, LAGOON_X + q * 12, LAGOON_Z + q * 85, 62);
@@ -99,7 +112,7 @@ function height(x, z) {
 	var d = Math.sqrt(dx * dx + dz * dz);
 	var cone = Math.max(0, 1 - Math.max(d, CRATER_R) / VOLC_R);
 	h += Math.pow(cone, 1.7) * VOLC_H * (0.85 + 0.3 * m);
-	h += cone * (1 - cone) * 34 * Math.sin(Math.atan2(dz, dx) * 17 + m * 8);  // gullies
+	h += cone * (1 - cone) * 46 * Math.sin(Math.atan2(dz, dx) * 21 + m * 8);  // gullies
 	if (d < CRATER_R) {
 		h -= smooth(1 - d / CRATER_R) * CRATER_DEPTH;
 	}
@@ -189,18 +202,18 @@ function nearestIsland(x, z) {
 function findOutposts(campX, campZ) {
 	var rand = makeRandom(31);
 	var out = [];
-	var count = [0, 0, 0, 0, 0, 0, 0, 0];
-	for (var tries = 0; tries < 20000; tries++) {
-		var x = (rand() - 0.5) * 3600, z = (rand() - 0.5) * 3600;
+	var count = ISLANDS.map(function () { return 0; });
+	for (var tries = 0; tries < 80000; tries++) {
+		var x = (rand() - 0.5) * SIZE * 0.9, z = (rand() - 0.5) * SIZE * 0.9;
 		var k = nearestIsland(x, z);
 		if (count[k] >= OUTPOSTS_ON[k]) {
 			continue;
 		}
 		var h = ground(x, z);
 		var rough = Math.abs(ground(x + 30, z) - h) + Math.abs(ground(x - 30, z) - h) + Math.abs(ground(x, z + 30) - h) + Math.abs(ground(x, z - 30) - h);
-		var far = (x - campX) * (x - campX) + (z - campZ) * (z - campZ) > 450 * 450;
+		var far = (x - campX) * (x - campX) + (z - campZ) * (z - campZ) > 600 * 600;
 		for (var i = 0; i < out.length; i++) {
-			far = far && (x - out[i].x) * (x - out[i].x) + (z - out[i].z) * (z - out[i].z) > 520 * 520;
+			far = far && (x - out[i].x) * (x - out[i].x) + (z - out[i].z) * (z - out[i].z) > 650 * 650;
 		}
 		if (h > 5 && h < 70 && rough < 9 && far) {
 			out.push({ x: x, z: z, y: h, alive: 0, free: false, flag: null });
@@ -314,26 +327,22 @@ function stampRoad(way) {
 	}
 }
 
-// roads: each place gets a road to the nearest place that already has a road. The first place is the camp.
+// roads: each place gets a road to the nearest earlier place on the same island. The first place is the camp.
 function makeRoads(places) {
-	var linked = [places[0]], rest = places.slice(1), roads = [];
-	while (rest.length > 0) {
-		var bestA = null, bestB = 0, bestD = 1e9;
-		for (var i = 0; i < linked.length; i++) {
-			for (var j = 0; j < rest.length; j++) {
-				var d = Math.sqrt((linked[i].x - rest[j].x) * (linked[i].x - rest[j].x) + (linked[i].z - rest[j].z) * (linked[i].z - rest[j].z));
-				if (d < bestD) {
-					bestD = d;
-					bestA = linked[i];
-					bestB = j;
-				}
+	var roads = [];
+	for (var i = 1; i < places.length; i++) {
+		var b = places[i];
+		var best = null, bestD = 1e9;
+		for (var j = 0; j < i; j++) {
+			var a = places[j];
+			var d = Math.sqrt((a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z));
+			if (nearestIsland(a.x, a.z) === nearestIsland(b.x, b.z) && d < bestD) {
+				bestD = d;
+				best = a;
 			}
 		}
-		var b = rest[bestB];
-		rest.splice(bestB, 1);
-		var way = findWay(bestA, b);
+		var way = best ? findWay(best, b) : null;
 		if (way) {
-			linked.push(b);
 			roads.push(roundWay(roundWay(way)));
 		}
 	}
