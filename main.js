@@ -2,8 +2,11 @@
 // Classic script. Global THREE. Units are meters.
 //
 // The files:
-//   world.js     the shape of the land (8 km x 8 km): heights, outposts, roads
-//   game.js      guns, enemies, outposts, HUD
+//   world.js     the shape of the land (16 km x 16 km): heights, outposts, roads
+//   game.js      guns, enemies, outposts, alarms, HUD
+//   weapons.js   rockets, grenades, explosions, barrels
+//   foes.js      enemy jeeps, boats, helicopters
+//   life.js      day and night, rain, animals, friendly people, treasure chests
 //   vehicles.js  jeeps, boats, helicopters, delta wings, parachute
 //   main.js      this file: all the graphics of the world, the input, the main loop
 //
@@ -28,7 +31,7 @@ var TREE_DIST = 800;     // m, trees and palms are visible to this distance
 var SMALL_DIST = 260;    // m, bushes and rocks are visible to this distance
 var BUILD_DIST = 950;    // m, a terrain piece nearer than this gets its fine mesh and its plants
 var DROP_DIST = 1500;    // m, a terrain piece farther than this loses them again (to free memory)
-var FAR_DIST = 5000;     // m, coarse terrain pieces are visible to this distance
+var FAR_DIST = 3500;     // m, coarse terrain pieces are visible to this distance (the fog hides all that is farther)
 
 // ---------- colors ----------
 
@@ -42,9 +45,18 @@ function mix3(a, b, t) {
 	return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
-// colors and normals for all grid points. The terrain pieces copy from these.
-var COLOR = new Float32Array((GRID + 1) * (GRID + 1) * 3);
-var NORMAL = new Float32Array((GRID + 1) * (GRID + 1) * 3);
+// the colors of the ground. Set in main().
+var PAL = null;
+
+function makePalette() {
+	return {
+		sand: rgb(0xffe6ac), blackSand: rgb(0x4a4642),
+		seaShallow: rgb(0x9ff5e0), seaDeep: rgb(0x04283f),
+		grassLight: rgb(0x7fa64a), grassDark: rgb(0x355f2e), grassDry: rgb(0xa9a25a), savanna: rgb(0xb7a65c),
+		rock: rgb(0x8d8474), rockDark: rgb(0x5e564d),
+		basalt: rgb(0x7a726b), rust: rgb(0x7a4630), dirt: rgb(0x9c7a52)
+	};
+}
 
 function groundColor(x, z, h, slope, road, pal) {
 	if (h < -8.3) {
@@ -74,31 +86,18 @@ function groundColor(x, z, h, slope, road, pal) {
 	return c;
 }
 
-function fillColors() {
-	var pal = {
-		sand: rgb(0xffe6ac), blackSand: rgb(0x4a4642),
-		seaShallow: rgb(0x9ff5e0), seaDeep: rgb(0x04283f),
-		grassLight: rgb(0x7fa64a), grassDark: rgb(0x355f2e), grassDry: rgb(0xa9a25a), savanna: rgb(0xb7a65c),
-		rock: rgb(0x8d8474), rockDark: rgb(0x5e564d),
-		basalt: rgb(0x7a726b), rust: rgb(0x7a4630), dirt: rgb(0x9c7a52)
-	};
-	for (var iz = 0; iz <= GRID; iz++) {
-		for (var ix = 0; ix <= GRID; ix++) {
-			var i = iz * (GRID + 1) + ix;
-			var x0 = Math.max(ix - 1, 0), x1 = Math.min(ix + 1, GRID);
-			var z0 = Math.max(iz - 1, 0), z1 = Math.min(iz + 1, GRID);
-			var gx = (H[iz * (GRID + 1) + x1] - H[iz * (GRID + 1) + x0]) / ((x1 - x0) * CELL);
-			var gz = (H[z1 * (GRID + 1) + ix] - H[z0 * (GRID + 1) + ix]) / ((z1 - z0) * CELL);
-			var c = groundColor(ix * CELL - SIZE / 2, iz * CELL - SIZE / 2, H[i], Math.sqrt(gx * gx + gz * gz), ROAD[i], pal);
-			var len = Math.sqrt(gx * gx + 1 + gz * gz);
-			COLOR[i * 3] = c[0];
-			COLOR[i * 3 + 1] = c[1];
-			COLOR[i * 3 + 2] = c[2];
-			NORMAL[i * 3] = -gx / len;
-			NORMAL[i * 3 + 1] = 1 / len;
-			NORMAL[i * 3 + 2] = -gz / len;
-		}
-	}
+// the color and the normal of one grid point. The world is too large to keep these for all points,
+// thus each terrain piece calculates them when it is made.
+// Returns [r, g, b, nx, ny, nz].
+function groundLook(ix, iz) {
+	var i = iz * (GRID + 1) + ix;
+	var x0 = Math.max(ix - 1, 0), x1 = Math.min(ix + 1, GRID);
+	var z0 = Math.max(iz - 1, 0), z1 = Math.min(iz + 1, GRID);
+	var gx = (H[iz * (GRID + 1) + x1] - H[iz * (GRID + 1) + x0]) / ((x1 - x0) * CELL);
+	var gz = (H[z1 * (GRID + 1) + ix] - H[z0 * (GRID + 1) + ix]) / ((z1 - z0) * CELL);
+	var c = groundColor(ix * CELL - SIZE / 2, iz * CELL - SIZE / 2, H[i], Math.sqrt(gx * gx + gz * gz), ROAD[i] / 255, PAL);
+	var len = Math.sqrt(gx * gx + 1 + gz * gz);
+	return [c[0], c[1], c[2], -gx / len, 1 / len, -gz / len];
 }
 
 // ---------- terrain pieces ----------
@@ -115,9 +114,10 @@ function patchGeometry(i0, j0, cells, step, skirt) {
 	function point(i, j, drop) {
 		var g = (j0 + j * step) * (GRID + 1) + i0 + i * step;
 		var x = (i0 + i * step) * CELL - SIZE / 2, z = (j0 + j * step) * CELL - SIZE / 2;
+		var look = groundLook(i0 + i * step, j0 + j * step);
 		pos.push(x, H[g] - drop, z);
-		nor.push(NORMAL[g * 3], NORMAL[g * 3 + 1], NORMAL[g * 3 + 2]);
-		col.push(COLOR[g * 3], COLOR[g * 3 + 1], COLOR[g * 3 + 2]);
+		nor.push(look[3], look[4], look[5]);
+		col.push(look[0], look[1], look[2]);
 		uv.push(x / 3.9, z / 3.9);
 		return pos.length / 3 - 1;
 	}
@@ -177,6 +177,7 @@ function makeChunks(parent, terrainMat) {
 				coarse: new THREE.Mesh(patchGeometry(i0, j0, CHUNK, 5, 30), terrainMat),
 				fine: null, trees: null, small: null
 			};
+			chunk.coarse.matrixAutoUpdate = false;   // the mesh does not move
 			parent.add(chunk.coarse);
 			chunks.push(chunk);
 		}
@@ -187,6 +188,7 @@ function makeChunks(parent, terrainMat) {
 // make the fine mesh and the plants of one piece. kit has the shared things: { terrainMat, assets, sun, clear, counts }.
 function buildChunk(c, parent, kit) {
 	c.fine = new THREE.Mesh(patchGeometry(c.i0, c.j0, CHUNK, 1, 6), kit.terrainMat);
+	c.fine.matrixAutoUpdate = false;
 	c.trees = new THREE.Group();
 	c.small = new THREE.Group();
 	if (c.land) {
@@ -1003,14 +1005,19 @@ function makeWater(sun, world, mirrorTerrain) {
 function makeClouds(textures, count) {
 	var rand = makeRandom(11);
 	var group = new THREE.Group();
+	// one material for each texture. life.js changes their color for the time of day.
+	var mats = [];
+	for (var t = 0; t < textures.length; t++) {
+		mats.push(new THREE.SpriteMaterial({ map: textures[t], color: 0xfff7ee, transparent: true, depthWrite: false, opacity: 0.92, fog: false, toneMapped: false }));
+	}
 	for (var i = 0; i < count; i++) {
-		var mat = new THREE.SpriteMaterial({ map: textures[i % textures.length], color: 0xfff7ee, transparent: true, depthWrite: false, opacity: 0.92, fog: false, toneMapped: false });
-		var s = new THREE.Sprite(mat);
-				var w = 600 + rand() * 1100;
+		var s = new THREE.Sprite(mats[i % mats.length]);
+		var w = 600 + rand() * 1100;
 		s.position.set((rand() - 0.5) * 12800, 800 + rand() * 500, (rand() - 0.5) * 12800);
 		s.scale.set(w, w * 0.5, 1);
 		group.add(s);
 	}
+	group.userData.mats = mats;
 	return group;
 }
 
@@ -1123,8 +1130,9 @@ function startSea() {
 
 // thumbsticks of the Quest controllers (xr-standard mapping: axes 2 and 3)
 // The right stick up and down is for the helicopter.
+// a = the A button of the right controller (next gun). x = the X button of the left controller (grenade).
 function readSticks(session) {
-	var out = { mx: 0, mz: 0, turn: 0, up: 0 };
+	var out = { mx: 0, mz: 0, turn: 0, up: 0, a: false, x: false };
 	for (var i = 0; i < session.inputSources.length; i++) {
 		var src = session.inputSources[i];
 		if (!src.gamepad || src.gamepad.axes.length < 4) {
@@ -1133,17 +1141,19 @@ function readSticks(session) {
 		if (src.handedness === 'left') {
 			out.mx = src.gamepad.axes[2];
 			out.mz = src.gamepad.axes[3];
+			out.x = src.gamepad.buttons.length > 4 && src.gamepad.buttons[4].pressed;
 		}
 		if (src.handedness === 'right') {
 			out.turn = src.gamepad.axes[2];
 			out.up = -src.gamepad.axes[3];
+			out.a = src.gamepad.buttons.length > 4 && src.gamepad.buttons[4].pressed;
 		}
 	}
 	return out;
 }
 
 function readKeys(keys) {
-	var out = { mx: 0, mz: 0, turn: 0, up: 0 };
+	var out = { mx: 0, mz: 0, turn: 0, up: 0, a: keys.KeyQ === true, x: keys.KeyG === true };
 	if (keys.KeyW || keys.ArrowUp) { out.mz -= 1; }
 	if (keys.KeyS || keys.ArrowDown) { out.mz += 1; }
 	if (keys.KeyA || keys.ArrowLeft) { out.mx -= 1; }
@@ -1288,7 +1298,7 @@ function main() {
 	}
 	makeRoads([camp].concat(outposts));
 	fillSea();
-	fillColors();
+	PAL = makePalette();
 	console.timeEnd('island: land');
 
 	// the player is a group. The stick moves the group. The headset moves the camera in the group.
@@ -1312,7 +1322,8 @@ function main() {
 	var sunLight = new THREE.DirectionalLight(0xffe6c0, 6.8);
 	sunLight.position.copy(sun).multiplyScalar(100);
 	scene.add(sunLight);
-	scene.add(new THREE.HemisphereLight(0xbfe0ff, 0x8a7f5a, 4.2));
+	var hemi = new THREE.HemisphereLight(0xbfe0ff, 0x8a7f5a, 4.2);
+	scene.add(hemi);
 
 	// textures
 	var puffs = [makePuffTexture(3), makePuffTexture(4), makePuffTexture(6)];
@@ -1334,7 +1345,7 @@ function main() {
 	// world: all the detailed objects. The reflection in the water does not show this group.
 	var world = new THREE.Group();
 	var chunks = makeChunks(world, terrainMat);
-	var kit = { terrainMat: terrainMat, assets: assets, sun: sun, clear: clear, counts: { palms: 0, trees: 0, bushes: 0, rocks: 0 } };
+	var kit = { terrainMat: terrainMat, assets: assets, sun: sun.clone(), clear: clear, counts: { palms: 0, trees: 0, bushes: 0, rocks: 0 } };
 	showChunks(chunks, player.position.x, player.position.z, world, kit, 999);   // all pieces near the start
 	var lavaRiver = makeLavaRiver(lavaTex);
 	var lake = makeLavaLake(lakeTex);
@@ -1355,7 +1366,7 @@ function main() {
 	scene.add(world);
 
 	// the reflection shows these objects
-	var mirrorTerrain = new THREE.Mesh(patchGeometry(0, 0, GRID, 10, 0), new THREE.MeshLambertMaterial({ vertexColors: true }));
+	var mirrorTerrain = new THREE.Mesh(patchGeometry(0, 0, GRID, 20, 0), new THREE.MeshLambertMaterial({ vertexColors: true }));
 	mirrorTerrain.visible = false;
 	var clouds = makeClouds(puffs, 70);
 	var smoke = makePlume(puffs[0], 14, 0x77706a, VOLC_X, ground(VOLC_X, VOLC_Z) + 30, VOLC_Z);
@@ -1376,9 +1387,19 @@ function main() {
 	if (!query.has('x')) {
 		startFlight(game, rides);   // the game starts on a delta wing, high above the main island
 	}
+	makeWeapons(game, world, puffs[2]);   // weapons.js: rockets, grenades, explosions, barrels
+	makeFoes(game, world);                // foes.js: enemy jeeps, boats, helicopters
+	var life = makeLife(game, world, scene, camp);   // life.js: day and night, rain, animals, friends, chests
+	life.shift = Number(query.get('t') || 0) * 60;
+	// env: the objects that change with the time of day and with the rain (life.js changes them)
+	var env = {
+		sun: sun, sunLight: sunLight, hemi: hemi, sky: sky, water: water, fog: scene.fog,
+		cloudMats: clouds.userData.mats, shadowMat: assets.shadowMat, birds: birds,
+		plumes: [{ group: smoke, color: 0x77706a }, { group: steam, color: 0xffffff }]
+	};
 	window.game = game;
 	window.rides = rides;
-	window.view = { renderer: renderer, chunks: chunks, world: world, kit: kit };
+	window.view = { renderer: renderer, chunks: chunks, world: world, kit: kit, life: life, env: env };
 
 	var keys = {};
 	setupDesktopInput(renderer.domElement, keys, player, camera, renderer);
@@ -1414,6 +1435,11 @@ function main() {
 			movePlayer(player, camera, input, dt, jx);
 		}
 		updateRides(game, rides, keys, dt);
+		game.onFoot = !rides.current && !rides.fall;
+		game.swimming = game.onFoot && ground(p.x, p.z) < -1.2;
+		updateWeapons(game, input, keys, dt);
+		updateFoes(game, dt);
+		updateLife(game, life, env, dt, time);
 		updateGame(game, dt, keys);
 
 		// make, remove and select the terrain pieces, 4 times each second
@@ -1455,4 +1481,8 @@ function main() {
 	});
 }
 
-main();
+// start after a short wait, thus the browser can show the text "Loading" first
+setTimeout(function () {
+	main();
+	document.getElementById('loading').style.display = 'none';
+}, 50);

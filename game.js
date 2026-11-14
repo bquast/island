@@ -3,6 +3,10 @@
 // main.js calls makeGame() one time and updateGame() each frame.
 //
 // The goal: each outpost has guards. When all guards of an outpost are dead, the outpost is free.
+// Each outpost has 3 guards, 1 heavy enemy (large, strong), and 1 sniper on the tower.
+// Each outpost has an alarm box on the flag pole. When the guards see you, the alarm starts after some seconds
+// and calls more enemies. A shot on the box stops the alarm.
+// The explosions, rockets and grenades are in weapons.js.
 //
 // Order of this file:
 //   constants, sound, geometry, ray math, guns, effects, HUD, enemies, game.
@@ -15,9 +19,18 @@ var ENEMY_FAR = 450;         // m, enemies farther than this are not shown and d
 var ENEMY_SEE = 55;          // m, an enemy sees you at this distance
 var ENEMY_HEAR = 140;        // m, an enemy hears your shots at this distance
 var ENEMY_RANGE = 28;        // m, an enemy stops at this distance and shoots
-var ENEMY_DAMAGE = 9;
-var RIFLE = { auto: true, interval: 0.11, damage: 34, spread: 0.012, muzzle: 0.58 };
-var PISTOL = { auto: false, interval: 0.22, damage: 70, spread: 0, muzzle: 0.22 };
+var ALARM_DELAY = 7;          // s, from the first alert guard to the alarm
+// each kind of enemy: health, damage of one shot, best chance of a hit, seconds between shots, size
+var GUARD = { hp: 100, damage: 9, aim: 0.45, wait: 1.2, size: 1 };
+var HEAVY = { hp: 320, damage: 15, aim: 0.5, wait: 0.9, size: 1.25 };
+var TOWER = { hp: 100, damage: 24, aim: 0.55, wait: 3.4, size: 1 };   // the sniper on the tower
+// the guns. range in m. The rocket launcher fires a rocket (weapons.js), the other guns fire a ray.
+var RIFLE = { name: 'RIFLE', auto: true, interval: 0.11, damage: 34, spread: 0.012, muzzle: 0.58, range: 320, rocket: false };
+var PISTOL = { name: 'PISTOL', auto: false, interval: 0.22, damage: 70, spread: 0, muzzle: 0.22, range: 200, rocket: false };
+var SNIPER = { name: 'SNIPER', auto: false, interval: 1.1, damage: 170, spread: 0, muzzle: 0.98, range: 900, rocket: false };
+var ROCKET = { name: 'ROCKETS', auto: false, interval: 1.8, damage: 0, spread: 0, muzzle: 0.75, range: 0, rocket: true };
+var RIGHT_GUNS = [RIFLE, SNIPER, ROCKET];   // the right hand changes between these
+var LEFT_GUNS = [PISTOL];
 
 // ---------- sound (made in code, no audio files) ----------
 
@@ -97,6 +110,27 @@ function rifleGeometry() {
 	]);
 }
 
+// a long rifle with a scope
+function sniperGeometry() {
+	return boxesGeometry([
+		[0.045, 0.065, 0.42, 0, 0, -0.14, 0x3a4032],     // body
+		[0.02, 0.02, 0.6, 0, 0.012, -0.66, 0x1c1d1f],    // barrel
+		[0.04, 0.07, 0.26, 0, -0.015, 0.2, 0x4a3524],    // stock
+		[0.035, 0.09, 0.04, 0, -0.075, 0, 0x4a3524],     // grip
+		[0.04, 0.04, 0.26, 0, 0.062, -0.12, 0x1c1d1f]    // scope
+	]);
+}
+
+// a tube on the hand
+function rocketGeometry() {
+	return boxesGeometry([
+		[0.11, 0.11, 0.95, 0, 0.03, -0.2, 0x4d5a3a],     // tube
+		[0.13, 0.13, 0.08, 0, 0.03, -0.66, 0x2a2c2e],    // front ring
+		[0.13, 0.13, 0.08, 0, 0.03, 0.26, 0x2a2c2e],     // rear ring
+		[0.035, 0.1, 0.04, 0, -0.07, 0, 0x2a2c2e]        // grip
+	]);
+}
+
 function pistolGeometry() {
 	return boxesGeometry([
 		[0.034, 0.045, 0.2, 0, 0.015, -0.1, 0x2a2c2e],   // slide
@@ -105,12 +139,12 @@ function pistolGeometry() {
 }
 
 // an enemy: 1.8 m tall, the face points to +z. Red shirt, rifle in the hands.
-function enemyBodyGeometry() {
+function enemyBodyGeometry(shirt, hat) {
 	return boxesGeometry([
-		[0.5, 0.6, 0.28, 0, 1.15, 0, 0xb3261e],          // shirt
+		[0.5, 0.6, 0.28, 0, 1.15, 0, shirt],             // shirt
 		[0.46, 0.14, 0.27, 0, 0.82, 0, 0x2c2a26],        // belt
 		[0.24, 0.26, 0.24, 0, 1.62, 0, 0xc48a5a],        // head
-		[0.26, 0.08, 0.26, 0, 1.74, 0, 0x7a1612],        // bandana
+		[0.26, 0.08, 0.26, 0, 1.74, 0, hat],             // bandana
 		[0.12, 0.12, 0.46, 0.29, 1.3, 0.2, 0xc48a5a],    // right arm
 		[0.12, 0.12, 0.52, -0.2, 1.3, 0.24, 0xc48a5a],   // left arm
 		[0.06, 0.1, 0.75, 0.1, 1.3, 0.5, 0x1c1d1f]       // rifle
@@ -167,11 +201,12 @@ function clearLine(a, b) {
 // distance along a ray to an enemy. The body is 3 spheres, the head is 1 small sphere.
 // Returns { t, head } or null.
 function rayEnemy(o, d, e) {
-	var head = raySphere(o, d, e.x, e.y + 1.63, e.z, 0.2);
+	var s = e.kind.size;
+	var head = raySphere(o, d, e.x, e.y + 1.63 * s, e.z, 0.2 * s);
 	var best = head;
 	var heights = [0.4, 0.8, 1.2];
 	for (var i = 0; i < 3; i++) {
-		var t = raySphere(o, d, e.x, e.y + heights[i], e.z, 0.38);
+		var t = raySphere(o, d, e.x, e.y + heights[i] * s, e.z, 0.38 * s);
 		if (t >= 0 && (best < 0 || t < best)) {
 			best = t;
 		}
@@ -188,30 +223,63 @@ var gunMaterial = null;
 
 function makeGun(stats, flashTex) {
 	gunMaterial = gunMaterial || new THREE.MeshLambertMaterial({ vertexColors: true });
-	var gun = new THREE.Mesh(stats === RIFLE ? rifleGeometry() : pistolGeometry(), gunMaterial);
+	var geo = stats === RIFLE ? rifleGeometry() : stats === SNIPER ? sniperGeometry() : stats === ROCKET ? rocketGeometry() : pistolGeometry();
+	var gun = new THREE.Mesh(geo, gunMaterial);
 	var flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTex, color: 0xffd060, transparent: true, depthWrite: false, fog: false, toneMapped: false }));
 	flash.position.set(0, 0.012, -stats.muzzle - 0.06);
 	flash.scale.set(0.22, 0.14, 1);
 	flash.visible = false;
 	gun.add(flash);
+	// the sniper rifle has a red laser line, thus you can aim without a scope
+	if (stats === SNIPER) {
+		var laser = new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.004, 120),
+			new THREE.MeshBasicMaterial({ color: 0xff2020, transparent: true, opacity: 0.55, depthWrite: false, fog: false, toneMapped: false }));
+		laser.position.set(0, 0.012, -stats.muzzle - 60);
+		gun.add(laser);
+	}
 	return gun;
 }
 
-// one hand = one Quest controller. The right hand gets the rifle, the left hand gets the pistol.
+// give a hand its guns. set is the list of gun stats. Only one gun is visible.
+function giveGuns(hand, set, flashTex) {
+	hand.set = set;
+	hand.guns = [];
+	for (var i = 0; i < set.length; i++) {
+		var gun = makeGun(set[i], flashTex);
+		hand.controller.add(gun);
+		hand.guns.push(gun);
+	}
+	selectGun(hand, 0);
+}
+
+function selectGun(hand, index) {
+	if (!hand.guns || index >= hand.guns.length) {
+		return;
+	}
+	for (var i = 0; i < hand.guns.length; i++) {
+		hand.guns[i].visible = i === index;
+	}
+	hand.index = index;
+	hand.gun = hand.guns[index];
+	hand.stats = hand.set[index];
+}
+
+// one hand = one Quest controller. The right hand gets the rifle, the sniper rifle and the rocket launcher.
+// The left hand gets the pistol.
 function makeHand(game, index, flashTex) {
 	var controller = game.renderer.xr.getController(index);
-	var hand = { controller: controller, aim: controller, gun: null, stats: null, held: false, pulled: false, cooldown: 0, flashTime: 0, gamepad: null };
+	var hand = { controller: controller, aim: controller, side: '', set: null, guns: null, index: 0, gun: null, stats: null, held: false, pulled: false, cooldown: 0, flashTime: 0, gamepad: null };
 	game.player.add(hand.controller);
 	hand.controller.addEventListener('connected', function (e) {
-		hand.stats = e.data.handedness === 'left' ? PISTOL : RIFLE;
-		hand.gun = makeGun(hand.stats, flashTex);
+		hand.side = e.data.handedness;
 		hand.gamepad = e.data.gamepad;
-		hand.controller.add(hand.gun);
+		giveGuns(hand, hand.side === 'left' ? LEFT_GUNS : RIGHT_GUNS, flashTex);
 	});
 	hand.controller.addEventListener('disconnected', function () {
-		if (hand.gun) {
-			hand.controller.remove(hand.gun);
+		for (var i = 0; hand.guns && i < hand.guns.length; i++) {
+			hand.controller.remove(hand.guns[i]);
 		}
+		hand.guns = null;
 		hand.gun = null;
 		hand.stats = null;
 	});
@@ -225,13 +293,13 @@ function makeHand(game, index, flashTex) {
 	return hand;
 }
 
-// the desktop hand: a rifle in front of the camera, Space = fire.
+// the desktop hand: the guns of the right hand, in front of the camera. Space or a click = fire.
 // The shot goes to the cross in the center of the screen.
 function makeDeskHand(game, flashTex) {
 	var holder = new THREE.Group();
 	holder.position.set(0.2, -0.16, -0.3);
-	var hand = { controller: holder, aim: game.camera, gun: makeGun(RIFLE, flashTex), stats: RIFLE, held: false, pulled: false, cooldown: 0, flashTime: 0, gamepad: null };
-	holder.add(hand.gun);
+	var hand = { controller: holder, aim: game.camera, side: 'desk', set: null, guns: null, index: 0, gun: null, stats: null, held: false, pulled: false, cooldown: 0, flashTime: 0, gamepad: null };
+	giveGuns(hand, RIGHT_GUNS, flashTex);
 	game.camera.add(holder);
 	return hand;
 }
@@ -254,9 +322,20 @@ function fireHand(game, hand) {
 	var eye = new THREE.Vector3().setFromMatrixPosition(hand.aim.matrixWorld);
 	var from = new THREE.Vector3(0, 0.012, -stats.muzzle).applyMatrix4(hand.controller.matrixWorld);
 
-	// find the nearest thing on the ray: the ground or an enemy
+	// the rocket launcher fires a rocket that flies (weapons.js)
+	if (stats.rocket) {
+		launchShot(game, from, dir.multiplyScalar(75), 'rocket');
+		playShot(0.6, 0.45);
+		shake(hand.gamepad);
+		hand.cooldown = stats.interval;
+		hand.flashTime = 0.08;
+		game.noise = 1.5;
+		return;
+	}
+
+	// find the nearest thing on the ray: the ground, an enemy, or a different target (vehicle, barrel, alarm, animal)
 	var best = null;
-	var bestT = rayGround(eye, dir, 300);
+	var bestT = rayGround(eye, dir, stats.range);
 	var head = false;
 	for (var i = 0; i < game.enemies.length; i++) {
 		var e = game.enemies[i];
@@ -267,14 +346,22 @@ function fireHand(game, hand) {
 			head = hit.head;
 		}
 	}
+	var other = rayOthers(game, eye, dir, bestT);   // weapons.js. { t, act } or null
+	if (other) {
+		best = null;
+		bestT = other.t;
+	}
 	var to = eye.clone().addScaledVector(dir, bestT);
 	showTracer(game, from, to, 0xffe9a0);
 	showPuff(game, to, best ? 0xc04030 : 0xd8cdb0, best ? 0.5 : 1);
 	if (best) {
 		hurtEnemy(game, best, stats.damage * (head ? 2 : 1));
 	}
+	if (other) {
+		other.act(stats.damage);
+	}
 
-	playShot(stats === RIFLE ? 0.5 : 0.4, stats === RIFLE ? 1 : 1.5);
+	playShot(stats === PISTOL ? 0.4 : stats === SNIPER ? 0.7 : 0.5, stats === PISTOL ? 1.5 : stats === SNIPER ? 0.7 : 1);
 	shake(hand.gamepad);
 	hand.cooldown = stats.interval;
 	hand.flashTime = 0.05;
@@ -366,12 +453,12 @@ function updateEffects(game, dt) {
 function makeHud(camera) {
 	var canvas = document.createElement('canvas');
 	canvas.width = 512;
-	canvas.height = 112;
+	canvas.height = 150;
 	var tex = new THREE.CanvasTexture(canvas);
 	tex.colorSpace = THREE.SRGBColorSpace;
-	var panel = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.0875),
+	var panel = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.117),
 		new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, fog: false, toneMapped: false }));
-	panel.position.set(-0.1, -0.27, -0.8);
+	panel.position.set(-0.1, -0.29, -0.8);
 	panel.renderOrder = 1000;
 	camera.add(panel);
 
@@ -385,21 +472,22 @@ function makeHud(camera) {
 }
 
 // line 1: health, kills, free outposts. Line 2: an arrow and the distance to the nearest enemy outpost, and a hint.
+// Line 3: the gun in the right hand, and the treasure chests.
 // target is { dist, turn } or null. turn is the angle from your view to the outpost (radians, + is right).
 function drawHud(hud, game, target) {
-	var text = [Math.ceil(game.hp), game.kills, game.freed, game.hint, target ? Math.round(target.dist / 10) : -1, target ? Math.round(target.turn * 5) : 0].join(' ');
+	var text = [Math.ceil(game.hp), game.kills, game.freed, game.hint, game.gunName, game.chests, target ? Math.round(target.dist / 10) : -1, target ? Math.round(target.turn * 5) : 0].join(' ');
 	if (text === hud.shown) {
 		return;
 	}
 	hud.shown = text;
 	var ctx = hud.canvas.getContext('2d');
-	ctx.clearRect(0, 0, 512, 112);
+	ctx.clearRect(0, 0, 512, 150);
 	ctx.fillStyle = 'rgba(0,0,0,0.45)';
-	ctx.fillRect(0, 0, 512, 112);
+	ctx.fillRect(0, 0, 512, 150);
 	ctx.fillStyle = '#5a1a14';
 	ctx.fillRect(12, 14, 170, 26);
 	ctx.fillStyle = game.hp > 35 ? '#4fd14a' : '#ff4a3a';
-	ctx.fillRect(12, 14, 170 * clamp(game.hp / 100, 0, 1), 26);
+	ctx.fillRect(12, 14, 170 * clamp(game.hp / game.maxHp, 0, 1), 26);
 	ctx.fillStyle = '#ffffff';
 	ctx.font = 'bold 26px sans-serif';
 	ctx.textBaseline = 'middle';
@@ -421,6 +509,9 @@ function drawHud(hud, game, target) {
 	}
 	ctx.fillStyle = '#ffe27a';
 	ctx.fillText(game.hint, 330, 82);
+	ctx.fillStyle = '#ffffff';
+	ctx.fillText(game.gunName, 14, 124);
+	ctx.fillText('CHESTS ' + game.chests + '/' + game.chestTotal, 198, 124);
 	hud.tex.needsUpdate = true;
 }
 
@@ -466,16 +557,23 @@ function placeEnemy(e, player) {
 	e.x = s.x;
 	e.z = s.z;
 	e.y = ground(e.x, e.z);
+	if (e.kind === TOWER) {
+		// the sniper stands on the floor of the watch tower (see makeOutpost in main.js)
+		e.x = e.home.x + 6;
+		e.z = e.home.z;
+		e.y = ground(e.home.x, e.home.z) + 6.3;
+	}
 	e.tx = e.x;
 	e.tz = e.z;
-	e.hp = 100;
+	e.hp = e.kind.hp;
 	e.state = 'patrol';
 	e.timer = 0;
 	e.deadTime = 0;
 	e.group.rotation.x = 0;
+	e.group.position.set(e.x, e.y, e.z);
 }
 
-function makeEnemy(parent, player, home, mat, bodyGeo, legGeo) {
+function makeEnemy(parent, player, home, kind, mat, bodyGeo, legGeo) {
 	var group = new THREE.Group();
 	var legL = new THREE.Mesh(legGeo, mat), legR = new THREE.Mesh(legGeo, mat);
 	legL.position.set(-0.13, 0.8, 0);
@@ -484,8 +582,9 @@ function makeEnemy(parent, player, home, mat, bodyGeo, legGeo) {
 	group.add(legL);
 	group.add(legR);
 	group.rotation.order = 'YXZ';
+	group.scale.setScalar(kind.size);
 	parent.add(group);
-	var e = { group: group, legL: legL, legR: legR, home: home, x: 0, y: 0, z: 0, tx: 0, tz: 0, hp: 100, state: 'patrol', timer: 0, deadTime: 0, step: Math.random() * 6, side: 1 };
+	var e = { group: group, legL: legL, legR: legR, home: home, kind: kind, x: 0, y: 0, z: 0, tx: 0, tz: 0, hp: kind.hp, state: 'patrol', timer: 0, deadTime: 0, step: Math.random() * 6, side: 1 };
 	placeEnemy(e, player);
 	return e;
 }
@@ -493,16 +592,19 @@ function makeEnemy(parent, player, home, mat, bodyGeo, legGeo) {
 // GUARDS enemies for each outpost, and ROAMERS enemies with no home
 function makeEnemies(parent, player, outposts) {
 	var mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-	var bodyGeo = enemyBodyGeometry(), legGeo = enemyLegGeometry();
+	var redGeo = enemyBodyGeometry(0xb3261e, 0x7a1612), heavyGeo = enemyBodyGeometry(0x34383c, 0x15171a), legGeo = enemyLegGeometry();
 	var list = [];
 	for (var i = 0; i < outposts.length; i++) {
-		outposts[i].alive = GUARDS;
-		for (var k = 0; k < GUARDS; k++) {
-			list.push(makeEnemy(parent, player, outposts[i], mat, bodyGeo, legGeo));
+		var o = outposts[i];
+		o.alive = GUARDS;
+		for (var k = 0; k < GUARDS - 2; k++) {
+			list.push(makeEnemy(parent, player, o, GUARD, mat, redGeo, legGeo));
 		}
+		list.push(makeEnemy(parent, player, o, HEAVY, mat, heavyGeo, legGeo));
+		list.push(makeEnemy(parent, player, o, TOWER, mat, redGeo, legGeo));
 	}
 	for (var r = 0; r < ROAMERS; r++) {
-		list.push(makeEnemy(parent, player, null, mat, bodyGeo, legGeo));
+		list.push(makeEnemy(parent, player, null, GUARD, mat, redGeo, legGeo));
 	}
 	return list;
 }
@@ -548,20 +650,22 @@ function walkEnemy(e, tx, tz, speed, dt) {
 
 // an enemy shoots at the player. The chance of a hit is smaller at a large distance.
 function enemyShoot(game, e, eye, dist) {
-	var from = new THREE.Vector3(e.x, e.y + 1.3, e.z);
+	var from = new THREE.Vector3(e.x, e.y + 1.3 * e.kind.size, e.z);
 	var to = eye.clone();
 	to.y -= 0.25;
 	from.addScaledVector(to.clone().sub(from).normalize(), 0.9);
-	var hit = Math.random() < clamp(0.5 - dist / 130, 0.08, 0.45);
+	// the sniper is good to 230 m. The other enemies are good to 130 m.
+	var reach = e.kind === TOWER ? 420 : 130;
+	var hit = Math.random() < clamp(e.kind.aim + 0.05 - dist / reach, 0.08, e.kind.aim);
 	if (!hit) {
 		to.x += (Math.random() - 0.5) * 3;
 		to.y += Math.random() * 1.2;
 		to.z += (Math.random() - 0.5) * 3;
 	}
-	showTracer(game, from, to, 0xff9a70);
-	playShot(clamp(12 / dist, 0.05, 0.4), 0.8);
+	showTracer(game, from, to, e.kind === TOWER ? 0xff3030 : 0xff9a70);
+	playShot(clamp(12 / dist, 0.05, 0.4), e.kind === TOWER ? 0.6 : 0.8);
 	if (hit) {
-		game.hp -= ENEMY_DAMAGE;
+		game.hp -= e.kind.damage;
 		game.hurtTime = 0;
 		game.hud.red.material.opacity = 0.35;
 	}
@@ -590,8 +694,34 @@ function updateEnemy(game, e, eye, dt) {
 		return;
 	}
 
+	// the sniper stays on the tower. It sees far and shoots far, but slowly.
+	if (e.kind === TOWER) {
+		var high = new THREE.Vector3(e.x, e.y + 1.4, e.z);
+		var far = Math.sqrt(dist * dist + (eye.y - high.y) * (eye.y - high.y));
+		if (e.state === 'patrol' && (far < 170 * game.sight || (game.noise > 0 && dist < ENEMY_HEAR))) {
+			e.state = 'alert';
+			e.timer = 1.5 + Math.random();
+		}
+		if (e.state === 'alert') {
+			e.home.alert = true;
+			e.group.rotation.y = Math.atan2(dx, dz);
+			e.timer -= dt;
+			if (e.timer <= 0) {
+				e.timer = e.kind.wait + Math.random() * 1.2;
+				if (far < 230 && clearLine(high, eye)) {
+					enemyShoot(game, e, eye, far);
+				}
+			}
+			if (dist > 300) {
+				e.state = 'patrol';
+			}
+		}
+		e.group.position.set(e.x, e.y, e.z);
+		return;
+	}
+
 	if (e.state === 'patrol') {
-		if (dist < ENEMY_SEE || (game.noise > 0 && dist < ENEMY_HEAR)) {
+		if (dist < ENEMY_SEE * game.sight || (game.noise > 0 && dist < ENEMY_HEAR)) {
 			e.state = 'alert';
 			e.timer = 0.6 + Math.random();
 		}
@@ -610,6 +740,9 @@ function updateEnemy(game, e, eye, dt) {
 	}
 
 	if (e.state === 'alert') {
+		if (e.home) {
+			e.home.alert = true;   // for the alarm of the outpost
+		}
 		e.group.rotation.y = Math.atan2(dx, dz);
 		if (dist > ENEMY_RANGE) {
 			moved = walkEnemy(e, game.player.position.x, game.player.position.z, 3.4, dt);
@@ -619,9 +752,9 @@ function updateEnemy(game, e, eye, dt) {
 		}
 		e.timer -= dt;
 		if (e.timer <= 0) {
-			e.timer = 1.2 + Math.random() * 1.6;
+			e.timer = e.kind.wait + Math.random() * 1.6;
 			e.side = -e.side;
-			var chest = new THREE.Vector3(e.x, e.y + 1.4, e.z);
+			var chest = new THREE.Vector3(e.x, e.y + 1.4 * e.kind.size, e.z);
 			// the distance for the shot includes the height (the player can be in the air)
 			var range = Math.sqrt(dist * dist + (eye.y - chest.y) * (eye.y - chest.y));
 			if (range < 110 && clearLine(chest, eye)) {
@@ -640,6 +773,81 @@ function updateEnemy(game, e, eye, dt) {
 	e.legR.rotation.x = -swing;
 }
 
+// ---------- alarms ----------
+
+// a red box on the flag pole of each outpost
+function makeAlarmBoxes(parent, outposts) {
+	for (var i = 0; i < outposts.length; i++) {
+		var o = outposts[i];
+		var box = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.3), new THREE.MeshLambertMaterial({ color: 0xe02a1a }));
+		box.position.set(o.x, ground(o.x, o.z) + 1.7, o.z + 0.22);
+		parent.add(box);
+		o.box = box;
+		o.alert = false;      // true in a frame where a guard of this outpost is in the fight
+		o.alarmTime = 0;      // seconds of fight
+		o.alarmOff = false;   // true after a shot on the box
+		o.alarmDone = false;  // true after the alarm
+	}
+}
+
+// a shot on the box: the alarm cannot start
+function stopAlarm(o) {
+	o.alarmOff = true;
+	o.box.material.color.set(0x444444);
+}
+
+// siren: a tone that goes up and down for 5 s
+function playSiren() {
+	var ac = getAudio();
+	if (!ac) {
+		return;
+	}
+	var osc = ac.createOscillator(), gain = ac.createGain();
+	osc.type = 'square';
+	gain.gain.value = 0.03;
+	for (var i = 0; i < 10; i++) {
+		osc.frequency.setValueAtTime(i % 2 ? 620 : 880, ac.currentTime + i * 0.5);
+	}
+	osc.connect(gain);
+	gain.connect(ac.destination);
+	osc.start();
+	osc.stop(ac.currentTime + 5);
+}
+
+// the alarm: 3 enemies from other places come to the outpost, and enemy vehicles come (foes.js)
+function startAlarm(game, o) {
+	o.alarmDone = true;
+	playSiren();
+	var moved = 0;
+	for (var i = 0; i < game.enemies.length && moved < 3; i++) {
+		var e = game.enemies[i];
+		var dx = e.x - game.player.position.x, dz = e.z - game.player.position.z;
+		if (!e.home && dx * dx + dz * dz > 300 * 300) {
+			var a = Math.random() * 6.28;
+			placeEnemy(e, game.player);
+			e.x = o.x + Math.cos(a) * 80;
+			e.z = o.z + Math.sin(a) * 80;
+			e.state = 'alert';
+			e.timer = 2;
+			moved++;
+		}
+	}
+	callFoes(game, o.x, o.z);
+}
+
+function updateAlarms(game, dt) {
+	for (var i = 0; i < game.outposts.length; i++) {
+		var o = game.outposts[i];
+		if (o.alert && !o.free && !o.alarmOff && !o.alarmDone) {
+			o.alarmTime += dt;
+			if (o.alarmTime > ALARM_DELAY) {
+				startAlarm(game, o);
+			}
+		}
+		o.alert = false;
+	}
+}
+
 // ---------- game ----------
 
 // parent is the group for the enemies. start is { x, z, yaw }: the player goes there after death.
@@ -647,7 +855,10 @@ function updateEnemy(game, e, eye, dt) {
 function makeGame(scene, player, camera, renderer, parent, puffTex, start, outposts) {
 	var game = {
 		scene: scene, player: player, camera: camera, renderer: renderer, start: start, outposts: outposts,
-		hp: 100, kills: 0, deaths: 0, freed: 0,
+		hp: 100, maxHp: 100, kills: 0, deaths: 0, freed: 0,
+		chests: 0, chestTotal: 0,   // treasure chests (life.js)
+		gunName: 'RIFLE',           // for the HUD
+		sight: 1,                   // 1 in the day. Smaller at night: the enemies see less far (life.js)
 		hint: '',         // short text on the HUD, for example how to enter a vehicle
 		restarted: false, // true for one frame after the death of the player
 		noise: 0,         // seconds that the enemies can still hear the last shot
@@ -661,13 +872,14 @@ function makeGame(scene, player, camera, renderer, parent, puffTex, start, outpo
 	game.hands.push(makeHand(game, 0, puffTex));
 	game.hands.push(makeHand(game, 1, puffTex));
 	game.desk = makeDeskHand(game, puffTex);
+	makeAlarmBoxes(parent, outposts);
 	return game;
 }
 
 // the player died: go back to the start camp. The enemies stop the attack. Roamers near the camp go to other locations.
 function restartPlayer(game) {
 	game.deaths++;
-	game.hp = 100;
+	game.hp = game.maxHp;
 	game.restarted = true;
 	game.player.position.set(game.start.x, 0, game.start.z);
 	game.player.rotation.y = game.start.yaw;
@@ -702,11 +914,12 @@ function updateGame(game, dt, keys) {
 	for (var i = 0; i < game.enemies.length; i++) {
 		updateEnemy(game, game.enemies[i], eye, dt);
 	}
+	updateAlarms(game, dt);
 
 	// health comes back slowly, 5 s after the last hit
 	game.hurtTime += dt;
 	if (game.hurtTime > 5) {
-		game.hp = Math.min(100, game.hp + 5 * dt);
+		game.hp = Math.min(game.maxHp, game.hp + 5 * dt);
 	}
 	if (game.hp <= 0) {
 		restartPlayer(game);

@@ -6,8 +6,8 @@
 
 // ---------- constants ----------
 
-var SIZE = 8000;         // side of the terrain square
-var GRID = 1000;         // cells on each side (8 m cells)
+var SIZE = 16000;        // side of the terrain square
+var GRID = 2000;         // cells on each side (8 m cells)
 var CELL = SIZE / GRID;
 var VOLC_X = 450;        // volcano center
 var VOLC_Z = -550;
@@ -20,13 +20,38 @@ var LAGOON_Z = 1150;
 var JETTY_LEN = 30;
 var JETTY_Y = 0.7;
 // islands: x, z, radius, height of the base. The first island is the main island.
+// These 14 islands are in the center of the map. addIslands() adds more islands around them.
 var ISLANDS = [
 	[0, 0, 1500, 56], [2600, -2100, 800, 40], [-2700, 1900, 750, 38], [2800, 1500, 600, 32],
 	[-2600, -2300, 560, 30], [300, 3100, 420, 24], [-1100, -3200, 380, 22], [1500, -3300, 300, 18],
 	[-3300, -200, 340, 22], [3400, -300, 300, 18], [1400, 3000, 260, 16], [-1500, 3200, 240, 16],
 	[3300, 3200, 280, 18], [-3400, 3300, 220, 14]
 ];
-var OUTPOSTS_ON = [6, 2, 2, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0];   // number of enemy outposts on each island
+var ISLAND_COUNT = 36;
+
+// add islands at random locations until there are ISLAND_COUNT islands. No island touches a different island.
+// The random numbers have a seed, thus the map is the same on each load.
+function addIslands() {
+	var rand = makeRandom(77);
+	for (var tries = 0; tries < 4000 && ISLANDS.length < ISLAND_COUNT; tries++) {
+		var x = (rand() - 0.5) * (SIZE - 1800), z = (rand() - 0.5) * (SIZE - 1800);
+		var r = 230 + rand() * rand() * 800;
+		var free = true;
+		for (var i = 0; i < ISLANDS.length; i++) {
+			var s = ISLANDS[i];
+			free = free && Math.sqrt((x - s[0]) * (x - s[0]) + (z - s[1]) * (z - s[1])) > (r + s[2]) * 1.75;
+		}
+		if (free) {
+			ISLANDS.push([Math.round(x), Math.round(z), Math.round(r), Math.round(14 + r * 0.032)]);
+		}
+	}
+}
+addIslands();
+
+// number of enemy outposts on each island: 6 on the main island, 2 on a large island, 1 on a medium island
+var OUTPOSTS_ON = ISLANDS.map(function (s, i) {
+	return i === 0 ? 6 : s[2] >= 700 ? 2 : s[2] >= 330 ? 1 : 0;
+});
 
 // ---------- math ----------
 
@@ -88,29 +113,44 @@ function height(x, z) {
 	}
 	var n = fbm(x * 0.0018 + 5, z * 0.0018 + 5);      // shape of the coast
 	var c = fbm(x * 0.006 + 11, z * 0.006 + 3);       // bays and capes
-	var k = fbm(x * 0.0035 + 70, z * 0.0035 + 20);    // hills and valleys
-	var m = fbm(x * 0.02 + 40, z * 0.02 + 40);        // rough ground
 	var h = -14;
 	for (var i = 0; i < ISLANDS.length; i++) {
 		var s = ISLANDS[i];
 		var dx0 = x - s[0], dz0 = z - s[1];
-		h = Math.max(h, (1 - Math.sqrt(dx0 * dx0 + dz0 * dz0) / (s[2] * (0.42 + 0.8 * n + 0.38 * c))) * s[3]);
+		if (dx0 * dx0 + dz0 * dz0 < s[2] * s[2] * 2.63) {   // only the islands that are near
+			h = Math.max(h, (1 - Math.sqrt(dx0 * dx0 + dz0 * dz0) / (s[2] * (0.42 + 0.8 * n + 0.38 * c))) * s[3]);
+		}
 	}
-	var inland = clamp(h / 20, 0, 1);
-	h += inland * inland * (k - 0.38) * 230;
-	h += 260 * bump(x, z, -850, 100, 420) * (0.4 + m);    // west mountains of the main island
-	h += 200 * bump(x, z, 2650, -2150, 320) * (0.4 + m);  // mountain on the north-east island
-	h += 150 * bump(x, z, -2750, 1850, 300) * (0.4 + m);  // mountain on the south-west island
-	h -= 30 * bump(x, z, LAGOON_X, LAGOON_Z, 150);        // lagoon
-	for (var q = 1; q <= 6; q++) {                        // channel from the lagoon to the sea
-		h -= 24 * bump(x, z, LAGOON_X + q * 12, LAGOON_Z + q * 85, 62);
+	var dig = 0;   // depth of the lagoon and its channel at this point
+	if (Math.abs(x - LAGOON_X) < 700 && Math.abs(z - LAGOON_Z) < 1100) {
+		dig = 30 * bump(x, z, LAGOON_X, LAGOON_Z, 150);       // lagoon
+		for (var q = 1; q <= 6; q++) {                        // channel from the lagoon to the sea
+			dig += 24 * bump(x, z, LAGOON_X + q * 12, LAGOON_Z + q * 85, 62);
+		}
 	}
-	h = h > 0 ? h * h / (h + 4) : h * 0.6;                // flat beaches, shallow shelf
-	h += (m - 0.5) * 9 * clamp(h / 5, 0, 1);              // rough ground on land
-
 	var dx = x - VOLC_X, dz = z - VOLC_Z;
 	var d = Math.sqrt(dx * dx + dz * dz);
 	var cone = Math.max(0, 1 - Math.max(d, CRATER_R) / VOLC_R);
+	// the sea near an island: no hills, no rough ground. No more calculation is necessary.
+	if (h <= 0 && cone === 0) {
+		return (h - dig) * 0.6;
+	}
+
+	var k = fbm(x * 0.0035 + 70, z * 0.0035 + 20);    // hills and valleys
+	var m = fbm(x * 0.02 + 40, z * 0.02 + 40);        // rough ground
+	var inland = clamp(h / 20, 0, 1);
+	h += inland * inland * (k - 0.38) * 230;
+	h += 260 * bump(x, z, -850, 100, 420) * (0.4 + m);    // west mountains of the main island
+	for (var b = 1; b < ISLANDS.length; b++) {            // a mountain on each large island
+		var t = ISLANDS[b];
+		if (t[2] >= 600 && Math.abs(x - t[0]) < t[2] && Math.abs(z - t[1]) < t[2]) {
+			h += t[2] * 0.26 * bump(x, z, t[0] + t[2] * 0.06, t[1] - t[2] * 0.06, t[2] * 0.4) * (0.4 + m);
+		}
+	}
+	h -= dig;
+	h = h > 0 ? h * h / (h + 4) : h * 0.6;                // flat beaches, shallow shelf
+	h += (m - 0.5) * 9 * clamp(h / 5, 0, 1);              // rough ground on land
+
 	h += Math.pow(cone, 1.7) * VOLC_H * (0.85 + 0.3 * m);
 	h += cone * (1 - cone) * 46 * Math.sin(Math.atan2(dz, dx) * 21 + m * 8);  // gullies
 	if (d < CRATER_R) {
@@ -123,12 +163,19 @@ function height(x, z) {
 
 // the height grid. All other code reads the ground from this grid.
 var H = new Float32Array((GRID + 1) * (GRID + 1));
-var ROAD = new Float32Array((GRID + 1) * (GRID + 1));   // 1 on a road, 0 off a road
+var ROAD = new Uint8Array((GRID + 1) * (GRID + 1));     // 255 on a road, 0 off a road
 
+// fill the grid. First all is deep sea. Then only the square around each island is calculated (this makes the load fast).
 function fillHeights() {
-	for (var iz = 0; iz <= GRID; iz++) {
-		for (var ix = 0; ix <= GRID; ix++) {
-			H[iz * (GRID + 1) + ix] = height(ix * CELL - SIZE / 2, iz * CELL - SIZE / 2);
+	H.fill(-8.4);
+	for (var k = 0; k < ISLANDS.length; k++) {
+		var s = ISLANDS[k];
+		var x0 = clamp(Math.floor((s[0] - s[2] * 1.62 + SIZE / 2) / CELL), 0, GRID), x1 = clamp(Math.ceil((s[0] + s[2] * 1.62 + SIZE / 2) / CELL), 0, GRID);
+		var z0 = clamp(Math.floor((s[1] - s[2] * 1.62 + SIZE / 2) / CELL), 0, GRID), z1 = clamp(Math.ceil((s[1] + s[2] * 1.62 + SIZE / 2) / CELL), 0, GRID);
+		for (var iz = z0; iz <= z1; iz++) {
+			for (var ix = x0; ix <= x1; ix++) {
+				H[iz * (GRID + 1) + ix] = height(ix * CELL - SIZE / 2, iz * CELL - SIZE / 2);
+			}
 		}
 	}
 }
@@ -165,7 +212,7 @@ function slopeAt(x, z) {
 function roadAt(x, z) {
 	var ix = clamp(Math.round((x + SIZE / 2) / CELL), 0, GRID);
 	var iz = clamp(Math.round((z + SIZE / 2) / CELL), 0, GRID);
-	return ROAD[iz * (GRID + 1) + ix];
+	return ROAD[iz * (GRID + 1) + ix] / 255;
 }
 
 // change the grid in a circle: f(index, weight). The weight is 1 in the inner radius and 0 at the outer radius.
@@ -203,7 +250,7 @@ function findOutposts(campX, campZ) {
 	var rand = makeRandom(31);
 	var out = [];
 	var count = ISLANDS.map(function () { return 0; });
-	for (var tries = 0; tries < 80000; tries++) {
+	for (var tries = 0; tries < 400000; tries++) {
 		var x = (rand() - 0.5) * SIZE * 0.9, z = (rand() - 0.5) * SIZE * 0.9;
 		var k = nearestIsland(x, z);
 		if (count[k] >= OUTPOSTS_ON[k]) {
@@ -320,12 +367,15 @@ function stampRoad(way) {
 			var k = t / len;
 			var h = ha + (hb - ha) * k;
 			stamp(a.x + (b.x - a.x) * k, a.z + (b.z - a.z) * k, 4, 13, function (j, w) {
-				ROAD[j] = Math.max(ROAD[j], w);
+				ROAD[j] = Math.max(ROAD[j], Math.round(w * 255));
 				H[j] += (h - H[j]) * w * 0.8;
 			});
 		}
 	}
 }
+
+// The list of roads is kept in ROADS, for the enemy jeeps.
+var ROADS = [];
 
 // roads: each place gets a road to the nearest earlier place on the same island. The first place is the camp.
 function makeRoads(places) {
@@ -349,6 +399,7 @@ function makeRoads(places) {
 	for (var r = 0; r < roads.length; r++) {
 		stampRoad(roads[r]);
 	}
+	ROADS = roads;
 	return roads;
 }
 

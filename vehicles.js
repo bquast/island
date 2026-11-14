@@ -20,8 +20,8 @@
 // eye: the height of the eyes of the player above the bottom of the vehicle. It is the same if you sit or stand
 // in the real room: the game measures the height of your head when you enter, and sets the seat height from that.
 var JEEP = { kind: 'jeep', speed: 22, reverse: 7, accel: 8, turn: 1.5, seatX: -0.45, seatZ: 0.35, eye: 1.95, reach: 4.5 };
-var BOAT = { kind: 'boat', speed: 19, reverse: 5, accel: 6, turn: 1.1, seatX: 0, seatZ: 0.7, eye: 1.9, reach: 6.5 };
-var HELI = { kind: 'heli', speed: 40, reverse: 12, climb: 11, turn: 1.2, seatX: -0.4, seatZ: -0.9, eye: 1.8, reach: 6 };
+var BOAT = { kind: 'boat', speed: 26, reverse: 5, accel: 6, turn: 1.1, seatX: 0, seatZ: 0.7, eye: 1.9, reach: 6.5 };
+var HELI = { kind: 'heli', speed: 55, reverse: 12, climb: 11, turn: 1.2, seatX: -0.4, seatZ: -0.9, eye: 1.8, reach: 6 };
 var WING = { kind: 'wing', speed: 17, seatX: 0, seatZ: 0, eye: 0, reach: 4 };
 var SPAWN_ALT = 650;     // m, the game starts on a delta wing at this height
 var CHUTE_FALL = 6;      // m/s, fall speed with the parachute
@@ -29,12 +29,13 @@ var DEADLY_FALL = 14;    // m/s, a landing on land faster than this kills
 
 // ---------- models (the front points to -z) ----------
 
-function jeepModel(mat) {
-	var green = 0x556b3a, dark = 0x26282a;
+// paint is the color of the body. The enemy vehicles (foes.js) use the same models with a different paint.
+function jeepModel(mat, paint) {
+	var green = paint, dark = 0x26282a;
 	var group = new THREE.Group();
 	group.add(new THREE.Mesh(boxesGeometry([
 		[1.7, 0.45, 3.5, 0, 0.75, 0, green],                                                 // body
-		[1.6, 0.2, 1.2, 0, 1.05, -1.1, 0x4d6235],                                            // hood
+		[1.6, 0.2, 1.2, 0, 1.05, -1.1, green],                                            // hood
 		[0.1, 0.4, 1.9, -0.8, 1.15, 0.75, green], [0.1, 0.4, 1.9, 0.8, 1.15, 0.75, green],   // sides
 		[1.7, 0.4, 0.1, 0, 1.15, 1.7, green],                                                // rear
 		[0.5, 0.5, 0.12, -0.45, 1.2, 0.68, dark], [0.5, 0.5, 0.12, 0.45, 1.2, 0.68, dark],   // seat backs
@@ -60,8 +61,8 @@ function jeepModel(mat) {
 	return { group: group, spin: spin };
 }
 
-function boatModel(mat) {
-	var white = 0xf2f0e8, blue = 0x1f5fa8;
+function boatModel(mat, paint) {
+	var white = 0xf2f0e8, blue = paint;
 	var group = new THREE.Group();
 	group.add(new THREE.Mesh(boxesGeometry([
 		[1.9, 0.6, 4.0, 0, 0.05, 0.2, white],                                                // hull
@@ -77,8 +78,8 @@ function boatModel(mat) {
 
 // the cabin is 2 closed boxes. From the seat you look out through them (a box is not visible from its inner side).
 // spin[0] is the main rotor, spin[1] is the tail rotor.
-function heliModel(mat) {
-	var olive = 0x5a6240, dark = 0x23262a;
+function heliModel(mat, paint) {
+	var olive = paint, dark = 0x23262a;
 	var group = new THREE.Group();
 	group.add(new THREE.Mesh(boxesGeometry([
 		[1.8, 0.7, 3.2, 0, 0.85, -0.7, olive],                                               // lower cabin
@@ -157,7 +158,7 @@ function chuteModel() {
 // ---------- make ----------
 
 function makeRide(parent, stats, x, z, yaw, mat) {
-	var model = stats.kind === 'jeep' ? jeepModel(mat) : stats.kind === 'boat' ? boatModel(mat) : stats.kind === 'heli' ? heliModel(mat) : wingModel();
+	var model = stats.kind === 'jeep' ? jeepModel(mat, 0x556b3a) : stats.kind === 'boat' ? boatModel(mat, 0x1f5fa8) : stats.kind === 'heli' ? heliModel(mat, 0x5a6240) : wingModel();
 	var ride = {
 		stats: stats, group: model.group, spin: model.spin,
 		x: x, z: z, y: stats.kind === 'boat' ? 0 : Math.max(ground(x, z), 0), yaw: yaw,

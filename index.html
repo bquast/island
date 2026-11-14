@@ -20,11 +20,16 @@ canvas { display: block; }
 	position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
 	font: 20px sans-serif; color: #fff; text-shadow: 0 0 3px #000; pointer-events: none;
 }
+#loading {
+	position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: #0b2233; color: #fff;
+	font: 24px sans-serif; display: flex; align-items: center; justify-content: center;
+}
 </style>
 </head>
 <body>
-<div id="help">Quest: left stick = move, drive or fly, right stick = turn (helicopter: up and down), triggers = fire, grip = enter or exit a vehicle, or open the parachute.<br>Desktop: W A S D = move, drive or fly, trackpad = look, click or Space = fire, E = enter or exit a vehicle, or open the parachute, R and F = helicopter up and down.</div>
+<div id="help">Quest: left stick = move, drive or fly. Right stick = turn (helicopter: up and down). Triggers = fire. Grip = enter or exit a vehicle, or open the parachute. A = next gun. X = grenade.<br>Desktop: W A S D = move, drive or fly. Trackpad = look. Click or Space = fire. E = vehicle or parachute. R and F = helicopter up and down. Q or 1 2 3 = gun. G = grenade. Shift = zoom with the sniper rifle.</div>
 <div id="cross">+</div>
+<div id="loading">Loading the islands...</div>
 <button id="enter">ENTER VR</button>
 <script src="three.min.js"></script>
 <script src="Water.js"></script>
@@ -32,6 +37,9 @@ canvas { display: block; }
 <script src="world.js"></script>
 <script src="game.js"></script>
 <script src="vehicles.js"></script>
+<script src="weapons.js"></script>
+<script src="foes.js"></script>
+<script src="life.js"></script>
 <script src="main.js"></script>
 </body>
 </html>
