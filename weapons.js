@@ -1,9 +1,10 @@
-// island weapons: rockets, grenades, explosions, barrels, and the change of guns.
+// island weapons: rockets, grenades, bombs, explosions, barrels, and the change of guns.
 // Classic script. It uses game.js (guns, enemies, effects, sound), foes.js (enemy vehicles) and life.js (animals).
 // main.js calls makeWeapons() one time and updateWeapons() each frame.
 //
 // Right hand: the A button (or Q, or the keys 1 2 3) changes the gun: rifle, sniper rifle, rocket launcher.
-// Left hand: the X button (or G) throws a grenade.
+// Left hand: the X button (or G) throws a grenade. In the delta wing or the helicopter it drops a bomb.
+// A red circle on the ground shows where the bomb will hit.
 // Desktop: hold Shift with the sniper rifle to zoom.
 //
 // Order of this file:
@@ -14,7 +15,9 @@
 var ROCKET_BLAST = { radius: 10, damage: 420 };
 var GRENADE_BLAST = { radius: 8, damage: 300 };
 var BARREL_BLAST = { radius: 9, damage: 300 };
+var BOMB_BLAST = { radius: 15, damage: 600 };
 var GRENADE_WAIT = 1.2;    // s between grenades
+var BOMB_WAIT = 0.45;      // s between bombs
 
 // ---------- explosions ----------
 
@@ -75,8 +78,12 @@ function explode(game, x, y, z, blast) {
 	}
 	for (var f = 0; f < game.foes.length; f++) {
 		var foe = game.foes[f];
-		var pf = part(foe.x, foe.y + 1, foe.z);
-		if (foe.state !== 'dead' && pf > 0) {
+		var points = foe.state === 'dead' ? [] : foePoints(foe);
+		var pf = 0;
+		for (var k = 0; k < points.length; k++) {
+			pf = Math.max(pf, part(points[k].x, points[k].y, points[k].z));
+		}
+		if (pf > 0) {
 			hurtFoe(game, foe, blast.damage * pf);
 		}
 	}
@@ -117,16 +124,16 @@ function makeShots(scene, count) {
 	return list;
 }
 
-// kind is 'rocket' or 'grenade'. vel is the velocity in m/s.
+// kind is 'rocket', 'grenade' or 'bomb'. vel is the velocity in m/s.
 function launchShot(game, pos, vel, kind) {
 	var s = game.shots[game.nextShot];
 	game.nextShot = (game.nextShot + 1) % game.shots.length;
 	s.pos.copy(pos);
 	s.vel.copy(vel);
 	s.kind = kind;
-	s.life = kind === 'rocket' ? 8 : 6;
+	s.life = kind === 'rocket' ? 8 : kind === 'bomb' ? 30 : 6;
 	s.smoke = 0;
-	s.mesh.scale.set(1, 1, kind === 'rocket' ? 1 : 0.25);
+	s.mesh.scale.set(kind === 'bomb' ? 3 : 1, kind === 'bomb' ? 3 : 1, kind === 'rocket' ? 1 : kind === 'bomb' ? 1.3 : 0.25);
 	s.mesh.visible = true;
 }
 
@@ -157,12 +164,15 @@ function updateShots(game, dt) {
 		}
 		for (var f = 0; f < game.foes.length && !hit; f++) {
 			var foe = game.foes[f];
-			hit = foe.state !== 'dead' && s.pos.distanceTo(new THREE.Vector3(foe.x, foe.y + 1.2, foe.z)) < foe.size + 0.5;
+			var points = foe.state === 'dead' ? [] : foePoints(foe);   // foes.js: the balls for hits
+			for (var k = 0; k < points.length && !hit; k++) {
+				hit = s.pos.distanceTo(points[k]) < foe.size + 0.5;
+			}
 		}
 		if (hit) {
 			s.life = 0;
 			s.mesh.visible = false;
-			explode(game, s.pos.x, s.pos.y, s.pos.z, s.kind === 'rocket' ? ROCKET_BLAST : GRENADE_BLAST);
+			explode(game, s.pos.x, s.pos.y, s.pos.z, s.kind === 'rocket' ? ROCKET_BLAST : s.kind === 'bomb' ? BOMB_BLAST : GRENADE_BLAST);
 		}
 	}
 }
@@ -180,6 +190,45 @@ function throwGrenade(game) {
 	var dir = new THREE.Vector3(0, 0, -1).transformDirection(from.matrixWorld);
 	var pos = new THREE.Vector3().setFromMatrixPosition(from.matrixWorld).addScaledVector(dir, 0.4);
 	launchShot(game, pos, dir.multiplyScalar(19).add(new THREE.Vector3(0, 5, 0)), 'grenade');
+}
+
+// ---------- bombs ----------
+
+// drop a bomb from the vehicle. It starts with the velocity of the vehicle, then it falls.
+function dropBomb(game) {
+	var pos = game.player.position.clone();
+	pos.y += 0.2;
+	launchShot(game, pos, game.flyVel, 'bomb');
+}
+
+// a red circle on the ground at the point where a bomb will hit, if you drop it now
+function makeBombSight(scene) {
+	var geo = new THREE.RingGeometry(BOMB_BLAST.radius - 1, BOMB_BLAST.radius, 40);
+	geo.rotateX(-Math.PI / 2);
+	var sight = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xff3020, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false, fog: false, toneMapped: false, side: THREE.DoubleSide }));
+	sight.renderOrder = 900;
+	sight.visible = false;
+	scene.add(sight);
+	return sight;
+}
+
+// calculate the fall of a bomb in steps of 0.1 s
+function updateBombSight(game) {
+	var sight = game.bombSight;
+	var high = game.player.position.y - Math.max(ground(game.player.position.x, game.player.position.z), 0);
+	sight.visible = game.flying && high > 6;
+	if (!sight.visible) {
+		return;
+	}
+	var x = game.player.position.x, y = game.player.position.y, z = game.player.position.z;
+	var vy = game.flyVel.y;
+	for (var i = 0; i < 300 && y > Math.max(ground(x, z), 0); i++) {
+		x += game.flyVel.x * 0.1;
+		z += game.flyVel.z * 0.1;
+		vy -= 9.8 * 0.1;
+		y += vy * 0.1;
+	}
+	sight.position.set(x, Math.max(ground(x, z), 0) + 0.5, z);
 }
 
 // ---------- barrels ----------
@@ -232,7 +281,9 @@ function rayOthers(game, o, d, maxT) {
 	}
 	game.foes.forEach(function (foe) {
 		if (foe.state !== 'dead') {
-			test(foe.x, foe.y + 1.2, foe.z, foe.size, function (damage) { hurtFoe(game, foe, damage); });
+			foePoints(foe).forEach(function (pt) {
+				test(pt.x, pt.y, pt.z, foe.size, function (damage) { hurtFoe(game, foe, damage); });
+			});
 		}
 	});
 	game.barrels.forEach(function (b) {
@@ -273,7 +324,8 @@ function mainHand(game) {
 function makeWeapons(game, parent, puffTex) {
 	game.blasts = makeBlasts(game.scene, puffTex, 6);
 	game.nextBlast = 0;
-	game.shots = makeShots(game.scene, 8);
+	game.shots = makeShots(game.scene, 16);
+	game.bombSight = makeBombSight(game.scene);
 	game.nextShot = 0;
 	game.barrels = makeBarrels(parent, game.outposts);
 	game.grenadeWait = 0;
@@ -295,12 +347,18 @@ function updateWeapons(game, input, keys, dt) {
 	}
 	game.wasA = input.a;
 
+	// the X button: a bomb when you fly (hold the button for a row of bombs), a grenade when you do not
 	game.grenadeWait -= dt;
-	if (input.x && !game.wasX && game.grenadeWait <= 0) {
+	if (game.flying && input.x && game.grenadeWait <= 0) {
+		dropBomb(game);
+		game.grenadeWait = BOMB_WAIT;
+	}
+	if (!game.flying && input.x && !game.wasX && game.grenadeWait <= 0) {
 		throwGrenade(game);
 		game.grenadeWait = GRENADE_WAIT;
 	}
 	game.wasX = input.x;
+	updateBombSight(game);
 
 	// desktop: Shift with the sniper rifle = zoom
 	var fov = !game.renderer.xr.isPresenting && hand && hand.stats === SNIPER && (keys.ShiftLeft || keys.ShiftRight) ? 16 : 70;

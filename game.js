@@ -472,10 +472,10 @@ function makeHud(camera) {
 }
 
 // line 1: health, kills, free outposts. Line 2: an arrow and the distance to the nearest enemy outpost, and a hint.
-// Line 3: the gun in the right hand, and the treasure chests.
+// Line 3: the gun in the right hand, the treasure chests, and the rings of the course in the sky.
 // target is { dist, turn } or null. turn is the angle from your view to the outpost (radians, + is right).
 function drawHud(hud, game, target) {
-	var text = [Math.ceil(game.hp), game.kills, game.freed, game.hint, game.gunName, game.chests, target ? Math.round(target.dist / 10) : -1, target ? Math.round(target.turn * 5) : 0].join(' ');
+	var text = [Math.ceil(game.hp), game.kills, game.freed, game.hint, game.gunName, game.chests, game.ringDone, target ? Math.round(target.dist / 10) : -1, target ? Math.round(target.turn * 5) : 0].join(' ');
 	if (text === hud.shown) {
 		return;
 	}
@@ -508,10 +508,12 @@ function drawHud(hud, game, target) {
 		ctx.fillText('ALL OUTPOSTS FREE', 14, 82);
 	}
 	ctx.fillStyle = '#ffe27a';
-	ctx.fillText(game.hint, 330, 82);
+	ctx.fillText(game.hint, 300, 82);
 	ctx.fillStyle = '#ffffff';
+	ctx.font = 'bold 22px sans-serif';
 	ctx.fillText(game.gunName, 14, 124);
-	ctx.fillText('CHESTS ' + game.chests + '/' + game.chestTotal, 198, 124);
+	ctx.fillText('CHESTS ' + game.chests + '/' + game.chestTotal, 150, 124);
+	ctx.fillText('RINGS ' + game.ringDone + '/' + game.ringTotal, 350, 124);
 	hud.tex.needsUpdate = true;
 }
 
@@ -857,6 +859,9 @@ function makeGame(scene, player, camera, renderer, parent, puffTex, start, outpo
 		scene: scene, player: player, camera: camera, renderer: renderer, start: start, outposts: outposts,
 		hp: 100, maxHp: 100, kills: 0, deaths: 0, freed: 0,
 		chests: 0, chestTotal: 0,   // treasure chests (life.js)
+		ringDone: 0, ringTotal: 0,  // the ring course in the sky (vehicles.js)
+		flying: false,              // true in the delta wing or the helicopter
+		flyVel: new THREE.Vector3(), // velocity of your vehicle, for the bombs
 		gunName: 'RIFLE',           // for the HUD
 		sight: 1,                   // 1 in the day. Smaller at night: the enemies see less far (life.js)
 		hint: '',         // short text on the HUD, for example how to enter a vehicle

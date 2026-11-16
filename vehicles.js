@@ -1,4 +1,5 @@
-// island vehicles: jeeps, boats, helicopters, delta wings (hang gliders), and the parachute.
+// island vehicles: the powered delta wing (the primary vehicle), jeeps, boats, helicopters, and the parachute.
+// Also the ring course in the sky.
 // Classic script. It uses ground(), clamp(), findShore() from world.js and boxesGeometry(), hurtEnemy(), getAudio() from game.js.
 //
 // main.js calls makeRides() one time and updateRides() each frame.
@@ -9,10 +10,11 @@
 //
 // One button does all: the grip button of a Quest controller, or the E key.
 //   near a vehicle: enter.  In a vehicle: exit.  In the air after an exit: open the parachute.
-// Drive or fly: the left stick, or W A S D. Helicopter up and down: the right stick, or R and F.
+// Drive or fly: the left stick, or W A S D.
+// The right stick up and down (or R and F): engine power of the delta wing, or up and down in the helicopter.
 //
 // Order of this file:
-//   constants, models, make, jeep and boat, helicopter, delta wing, parachute, enter and exit, sound, update.
+//   constants, models, make, jeep and boat, helicopter, delta wing, parachute, enter and exit, rings, sound, update.
 
 // ---------- constants ----------
 
@@ -22,8 +24,11 @@
 var JEEP = { kind: 'jeep', speed: 22, reverse: 7, accel: 8, turn: 1.5, seatX: -0.45, seatZ: 0.35, eye: 1.95, reach: 4.5 };
 var BOAT = { kind: 'boat', speed: 26, reverse: 5, accel: 6, turn: 1.1, seatX: 0, seatZ: 0.7, eye: 1.9, reach: 6.5 };
 var HELI = { kind: 'heli', speed: 55, reverse: 12, climb: 11, turn: 1.2, seatX: -0.4, seatZ: -0.9, eye: 1.8, reach: 6 };
-var WING = { kind: 'wing', speed: 17, seatX: 0, seatZ: 0, eye: 0, reach: 4 };
-var SPAWN_ALT = 650;     // m, the game starts on a delta wing at this height
+// the delta wing has an engine. thrust: m/s2 at full power. lift: m/s, it leaves the ground above this speed.
+var WING = { kind: 'wing', speed: 45, thrust: 7.5, lift: 15, seatX: 0, seatZ: 0, eye: 1.75, reach: 5 };
+var SPAWN_ALT = 450;     // m, the game starts on the delta wing at this height
+var RING_COUNT = 14;     // rings of the course in the sky
+var RING_SIZE = 24;      // m, radius of a ring
 var CHUTE_FALL = 6;      // m/s, fall speed with the parachute
 var DEADLY_FALL = 14;    // m/s, a landing on land faster than this kills
 
@@ -106,20 +111,22 @@ function heliModel(mat, paint) {
 
 // a bar from point a to point b
 function barMesh(a, b, mat) {
-	var bar = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.045, 1), mat);
+	var bar = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.028, 1), mat);
 	bar.position.copy(a).add(b).multiplyScalar(0.5);
 	bar.lookAt(b);
 	bar.scale.z = a.distanceTo(b);
 	return bar;
 }
 
-// a delta wing. The pilot stands at the origin, the sail is above the head, the control bar is in front of the chest.
-function wingModel() {
+// a powered delta wing (a trike). The pilot is at the origin, the sail is above the head,
+// the control bar is in front of the chest, the engine and the propeller are behind.
+// spin[0] is the propeller.
+function wingModel(mat) {
 	var group = new THREE.Group();
 	var sail = new THREE.BufferGeometry();
 	sail.setAttribute('position', new THREE.Float32BufferAttribute([
-		0, 2.45, -1.7, -4.6, 2.3, 1.5, 0, 2.3, 0.9,
-		0, 2.45, -1.7, 0, 2.3, 0.9, 4.6, 2.3, 1.5
+		0, 2.65, -1.7, -4.6, 2.5, 1.5, 0, 2.5, 0.9,
+		0, 2.65, -1.7, 0, 2.5, 0.9, 4.6, 2.5, 1.5
 	], 3));
 	sail.setAttribute('color', new THREE.Float32BufferAttribute([
 		1, 0.75, 0.1, 0.9, 0.2, 0.1, 1, 0.75, 0.1,
@@ -128,12 +135,25 @@ function wingModel() {
 	sail.computeVertexNormals();
 	group.add(new THREE.Mesh(sail, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })));
 	var metal = new THREE.MeshLambertMaterial({ color: 0x9aa0a6 });
-	var top = new THREE.Vector3(0, 2.35, -0.3), left = new THREE.Vector3(-0.75, 1.05, -0.55), right = new THREE.Vector3(0.75, 1.05, -0.55);
+	var top = new THREE.Vector3(0, 2.55, -0.3), left = new THREE.Vector3(-0.85, 0.95, -0.8), right = new THREE.Vector3(0.85, 0.95, -0.8);
 	group.add(barMesh(top, left, metal));
 	group.add(barMesh(top, right, metal));
 	group.add(barMesh(left, right, metal));
-	group.add(barMesh(new THREE.Vector3(0, 2.42, -1.7), new THREE.Vector3(0, 2.3, 0.9), metal));
-	return { group: group, spin: [] };
+	group.add(barMesh(new THREE.Vector3(0, 2.62, -1.7), new THREE.Vector3(0, 2.5, 0.9), metal));
+	group.add(barMesh(top, new THREE.Vector3(0, 0.5, 0.7), metal));   // mast to the cart
+	var dark = 0x26282a;
+	group.add(new THREE.Mesh(boxesGeometry([
+		[0.36, 0.1, 1.7, 0, 0.3, 0.3, 0xc8261a],                                           // floor of the cart (narrow: you look down past it)
+		[0.5, 0.5, 0.1, 0, 0.75, 0.55, dark],                                              // seat back
+		[0.45, 0.4, 0.45, 0, 0.75, 0.95, dark],                                            // engine
+		[0.16, 0.3, 0.16, -0.7, 0.15, 0.6, dark], [0.16, 0.3, 0.16, 0.7, 0.15, 0.6, dark], // rear wheels
+		[1.4, 0.06, 0.06, 0, 0.3, 0.6, 0x9aa0a6],                                          // axle
+		[0.12, 0.3, 0.14, 0, 0.15, -0.5, dark]                                             // front wheel
+	]), mat));
+	var prop = new THREE.Mesh(boxesGeometry([[1.7, 0.12, 0.04, 0, 0, 0, 0x3a2a1c], [0.12, 1.7, 0.04, 0, 0, 0, 0x3a2a1c]]), mat);
+	prop.position.set(0, 0.95, 1.25);
+	group.add(prop);
+	return { group: group, spin: [prop] };
 }
 
 // the parachute: a round canopy above the player, and lines. It is a child of the player group.
@@ -158,14 +178,16 @@ function chuteModel() {
 // ---------- make ----------
 
 function makeRide(parent, stats, x, z, yaw, mat) {
-	var model = stats.kind === 'jeep' ? jeepModel(mat, 0x556b3a) : stats.kind === 'boat' ? boatModel(mat, 0x1f5fa8) : stats.kind === 'heli' ? heliModel(mat, 0x5a6240) : wingModel();
+	var model = stats.kind === 'jeep' ? jeepModel(mat, 0x556b3a) : stats.kind === 'boat' ? boatModel(mat, 0x1f5fa8) : stats.kind === 'heli' ? heliModel(mat, 0x5a6240) : wingModel(mat);
 	var ride = {
 		stats: stats, group: model.group, spin: model.spin,
 		x: x, z: z, y: stats.kind === 'boat' ? 0 : Math.max(ground(x, z), 0), yaw: yaw,
 		seatY: 0,                   // height of the feet of the player in the vehicle (set when the player enters)
 		speed: 0,                   // forward speed (jeep, boat, delta wing)
 		vx: 0, vy: 0, vz: 0,        // velocity (helicopter)
-		pitch: 0, roll: 0, rotor: 0 // delta wing angles, rotor speed 0 to 1
+		pitch: 0, roll: 0, rotor: 0, // delta wing angles, rotor speed 0 to 1
+		throttle: 0,                // delta wing: engine power, 0 to 1
+		follow: false               // delta wing: true when it flies to the player with no pilot
 	};
 	model.group.rotation.order = 'YXZ';
 	model.group.position.set(ride.x, ride.y, ride.z);
@@ -175,14 +197,16 @@ function makeRide(parent, stats, x, z, yaw, mat) {
 }
 
 // the camp and each outpost get a jeep and a boat. The boat is at the nearest point of the open sea.
-// The camp and each third outpost get a helicopter. Delta wings are on the volcano and on the west mountains.
+// The camp and each third outpost get a helicopter. The camp and each outpost get a delta wing.
+// More delta wings are on the volcano and on the mountains.
 function makeRides(game, parent, camp, jx, outposts) {
 	var mat = new THREE.MeshLambertMaterial({ vertexColors: true });
 	var rides = {
 		list: [], current: null,
 		fall: null,           // { vx, vy, vz, chute } when the player is in the air with no vehicle
 		chute: chuteModel(),
-		startWing: null,      // the delta wing of the start of the game
+		startWing: null,      // your own delta wing: the game starts on it, and it comes to you when you left it in the air
+		rings: null, ring: 0, laps: 0,   // the ring course
 		started: false,       // the first flight waits for the first click, key or VR session
 		want: false, keyDown: false, engine: null
 	};
@@ -195,16 +219,20 @@ function makeRides(game, parent, camp, jx, outposts) {
 		var shore = findShore(o.x, o.z);
 		rides.list.push(makeRide(parent, JEEP, o.x + 8, o.z + 8, i * 1.3, mat));
 		rides.list.push(makeRide(parent, BOAT, shore.x, shore.z, i * 2.1, mat));
+		rides.list.push(makeRide(parent, WING, o.x - 20, o.z - 22, i * 1.7, mat));
 		if (i % 3 === 0) {
 			rides.list.push(makeRide(parent, HELI, o.x - 14, o.z + 2, i * 0.9, mat));
 		}
 	}
+	rides.list.push(makeRide(parent, WING, jx - 30, camp.z + 24, 2.2, mat));
 	rides.list.push(makeRide(parent, WING, VOLC_X, VOLC_Z + CRATER_R + 14, 0, mat));
 	rides.list.push(makeRide(parent, WING, VOLC_X - CRATER_R - 14, VOLC_Z, 0, mat));
 	rides.list.push(makeRide(parent, WING, -850, 100, 0, mat));
 	rides.list.push(makeRide(parent, WING, 2650, -2150, 0, mat));
 	rides.startWing = makeRide(parent, WING, 0, 0, 0, mat);
 	rides.list.push(rides.startWing);
+	rides.rings = makeRings(parent);
+	game.ringTotal = RING_COUNT;
 
 	// the grip button of each controller
 	for (var h = 0; h < game.hands.length; h++) {
@@ -222,7 +250,7 @@ function makeRides(game, parent, camp, jx, outposts) {
 	return rides;
 }
 
-// put the player on the start delta wing, high in the air, with the nose to the camp.
+// put the player on the own delta wing, high in the air, with the nose to the camp and the engine on.
 // This is the start of the game, and the start after each death.
 function startFlight(game, rides) {
 	var wing = rides.startWing;
@@ -230,9 +258,12 @@ function startFlight(game, rides) {
 	wing.z = game.start.z - 2300;
 	wing.y = SPAWN_ALT;
 	wing.yaw = Math.atan2(wing.x - game.start.x, wing.z - game.start.z);
-	wing.speed = WING.speed;
-	wing.pitch = -0.08;
+	wing.speed = 30;
+	wing.throttle = 0.6;
+	wing.pitch = 0;
 	wing.roll = 0;
+	wing.follow = false;
+	wing.seatY = clamp(WING.eye - game.camera.position.y, 0, 1.4);
 	rides.current = wing;
 	rides.fall = null;
 	rides.chute.visible = false;
@@ -363,44 +394,94 @@ function parkHeli(ride, dt) {
 
 // ---------- delta wing ----------
 
-// There is no engine. The nose down gives speed, the nose up gives height but uses speed.
-// Stick forward = nose down, stick back = nose up, stick left and right = turn.
-// Returns true when the wing is on the ground (the flight is done).
+// The delta wing has an engine. input.up changes the power (right stick, or R and F). The power stays where you put it.
+// In the air: stick forward = nose down, stick back = nose up, stick left and right = turn.
+//   With power you fly level or go up. With no power you glide down slowly.
+// On the ground or on the water: the wing rolls. Above the lift speed it goes up again.
+//   To land: decrease the power and come down. To stop: no power.
 function flyWing(ride, input, dt) {
+	var stats = ride.stats;
 	var push = Math.abs(input.mz) > 0.15 ? -input.mz : 0;
 	var steer = Math.abs(input.mx) > 0.15 ? input.mx : 0;
-
-	var wantPitch = -0.08 - push * (push > 0 ? 0.45 : 0.4);
-	ride.pitch += (wantPitch - ride.pitch) * 2 * dt;
-	ride.roll += (steer * 0.75 - ride.roll) * 2.5 * dt;
-	ride.yaw -= ride.roll * 0.9 * dt;
-
-	// speed from gravity and drag. At low speed the wing does not carry and goes down fast.
-	ride.speed += (-9 * Math.sin(ride.pitch) - 0.003 * ride.speed * ride.speed) * dt;
-	ride.speed = clamp(ride.speed, 6, 45);
-	var sink = 1.2 + Math.max(0, 13 - ride.speed) * 0.5;
-	var fx = -Math.sin(ride.yaw), fz = -Math.cos(ride.yaw);
-	ride.x = clamp(ride.x + fx * ride.speed * Math.cos(ride.pitch) * dt, -SIZE / 2 + 20, SIZE / 2 - 20);
-	ride.z = clamp(ride.z + fz * ride.speed * Math.cos(ride.pitch) * dt, -SIZE / 2 + 20, SIZE / 2 - 20);
-	ride.y += (ride.speed * Math.sin(ride.pitch) - sink) * dt;
+	var power = Math.abs(input.up) > 0.15 ? input.up : 0;
+	ride.throttle = clamp(ride.throttle + power * 0.8 * dt, 0, 1);
 
 	var floor = Math.max(ground(ride.x, ride.z), 0);
-	var landed = ride.y <= floor + 0.4;
-	if (landed) {
-		ride.y = floor;
-		ride.speed = 0;
+	var fx = -Math.sin(ride.yaw), fz = -Math.cos(ride.yaw);
+	if (ride.y <= floor + 0.05) {
+		// on the ground: engine, friction, steering
+		ride.speed += (stats.thrust * ride.throttle - 2 - 0.003 * ride.speed * ride.speed) * dt;
+		ride.speed = Math.max(ride.speed, 0);
+		ride.yaw -= steer * 1.2 * dt * Math.min(1, ride.speed / 4);
+		var nx = clamp(ride.x + fx * ride.speed * dt, -SIZE / 2 + 20, SIZE / 2 - 20);
+		var nz = clamp(ride.z + fz * ride.speed * dt, -SIZE / 2 + 20, SIZE / 2 - 20);
+		var next = Math.max(ground(nx, nz), 0);
+		if ((next - floor) / Math.max(ride.speed * dt, 0.01) > 0.7) {
+			ride.speed = 0;   // a wall of rock
+		} else {
+			ride.x = nx;
+			ride.z = nz;
+		}
+		ride.y = Math.max(ground(ride.x, ride.z), 0);
 		ride.pitch = 0;
 		ride.roll = 0;
+		// fast: leave the ground
+		if (ride.speed > stats.lift && push < 0.3) {
+			ride.y += 0.3;
+			ride.pitch = 0.15;
+		}
+	} else {
+		// in the air. With half power or more, the wing flies level when the stick is free.
+		// With less power it glides down. glide is 1 with no power and 0 from half power.
+		var glide = clamp(1 - ride.throttle * 2, 0, 1);
+		var wantPitch = -0.08 * glide - push * (push > 0 ? 0.45 : 0.4);
+		if (ride.y < floor + 25 && ride.throttle > 0.5 && push <= 0) {
+			wantPitch = Math.max(wantPitch, 0.18);   // after the start: go up
+		}
+		ride.pitch += (wantPitch - ride.pitch) * 2 * dt;
+		ride.roll += (steer * 0.75 - ride.roll) * 2.5 * dt;
+		ride.yaw -= ride.roll * 0.9 * dt;
+
+		// speed from the engine, gravity and drag. At low speed the wing does not carry and goes down fast.
+		ride.speed += (stats.thrust * ride.throttle - 9 * Math.sin(ride.pitch) - 0.003 * ride.speed * ride.speed) * dt;
+		ride.speed = clamp(ride.speed, 6, stats.speed);
+		var sink = 1.2 * glide + Math.max(0, 13 - ride.speed) * 0.5;
+		ride.x = clamp(ride.x + fx * ride.speed * Math.cos(ride.pitch) * dt, -SIZE / 2 + 20, SIZE / 2 - 20);
+		ride.z = clamp(ride.z + fz * ride.speed * Math.cos(ride.pitch) * dt, -SIZE / 2 + 20, SIZE / 2 - 20);
+		ride.vy = ride.speed * Math.sin(ride.pitch) - sink;
+		ride.y = Math.min(ride.y + ride.vy * dt, 2000);
+		floor = Math.max(ground(ride.x, ride.z), 0);
+		if (ride.y <= floor) {
+			ride.y = floor;   // landing. The wing rolls on.
+			ride.vy = 0;
+		}
 	}
+	ride.spin[0].rotation.z += (4 + ride.throttle * 40) * dt;
 	ride.group.rotation.set(ride.pitch, ride.yaw, -ride.roll, 'YXZ');
 	placeRide(ride);
-	return landed;
 }
 
-// a wing with no pilot in the air: it comes down
-function parkWing(ride, dt) {
+// a wing with no pilot. In the air it comes down.
+// Your own wing, when you left it in the air (ride.follow), flies to you and lands near you.
+function parkWing(ride, dt, player) {
 	var floor = Math.max(ground(ride.x, ride.z), 0);
-	if (ride.y > floor) {
+	ride.throttle = 0;
+	ride.speed = 0;
+	if (ride.follow) {
+		var dx = player.x - ride.x, dz = player.z - ride.z;
+		var d = Math.sqrt(dx * dx + dz * dz);
+		if (d > 9) {
+			ride.x += dx / d * 24 * dt;
+			ride.z += dz / d * 24 * dt;
+			ride.yaw = Math.atan2(-dx, -dz);
+			ride.spin[0].rotation.z += 30 * dt;
+		}
+		floor = Math.max(ground(ride.x, ride.z), 0);
+		ride.y = Math.max(floor, ride.y - (d > 60 ? 4 : 10) * dt);
+		ride.follow = d > 9 || ride.y > floor;
+		ride.group.rotation.set(0, ride.yaw, 0, 'YXZ');
+		placeRide(ride);
+	} else if (ride.y > floor) {
 		ride.y = Math.max(floor, ride.y - 12 * dt);
 		ride.group.rotation.set(0, ride.yaw, 0, 'YXZ');
 		placeRide(ride);
@@ -413,18 +494,21 @@ function driveRide(game, rides, input, dt) {
 	var ride = rides.current, stats = ride.stats;
 	var oldYaw = ride.yaw;
 	var p = game.player;
+	var x0 = ride.x, y0 = ride.y, z0 = ride.z;
 
 	if (stats.kind === 'wing') {
 		// the first flight waits for the first click, key, or VR session
-		if (rides.started && flyWing(ride, input, dt)) {
-			rides.current = null;
-			p.position.set(ride.x - 1.5, ride.y, ride.z);
-			return;
+		if (rides.started) {
+			flyWing(ride, input, dt);
 		}
 	} else if (stats.kind === 'heli') {
 		flyHeli(ride, input, dt);
 	} else {
 		driveGround(game, ride, input, dt);
+	}
+	// the velocity of the vehicle, for the bombs (weapons.js)
+	if (dt > 0) {
+		game.flyVel.set((ride.x - x0) / dt, (ride.y - y0) / dt, (ride.z - z0) / dt);
 	}
 
 	// the player is on the seat, and turns with the vehicle.
@@ -491,6 +575,7 @@ function toggleRide(game, rides) {
 			var vz = r.stats.kind === 'heli' ? r.vz : fz * r.speed;
 			rides.fall = { vx: vx, vy: Math.min(r.vy, 0), vz: vz, chute: false };
 			p.y -= 2;
+			r.follow = r === rides.startWing;   // your own wing comes to you after you land
 		} else {
 			// exit to the left side
 			p.x = r.x + fz * 2.3;
@@ -506,23 +591,57 @@ function toggleRide(game, rides) {
 			rides.current = ride;
 			// seat height: put the eyes at stats.eye. camera.position.y is the height of the head in the real room.
 			ride.seatY = ride.stats.eye > 0 ? clamp(ride.stats.eye - game.camera.position.y, 0, 1.4) : 0;
-			if (ride.stats.kind === 'wing') {
-				// a delta wing starts in the direction that you look, with a small jump
-				var look = new THREE.Vector3();
-				game.camera.getWorldDirection(look);
-				ride.yaw = Math.atan2(-look.x, -look.z);
-				ride.x = p.x;
-				ride.z = p.z;
-				ride.y = p.y + 2.5;
-				ride.speed = WING.speed;
-				ride.pitch = -0.08;
-				ride.roll = 0;
-			} else if (!game.renderer.xr.isPresenting) {
+			ride.follow = false;
+			ride.throttle = 0;
+			if (!game.renderer.xr.isPresenting) {
 				game.player.rotation.y = ride.yaw;
 			}
 			return;
 		}
 	}
+}
+
+// ---------- rings ----------
+
+// a course of rings in the sky around the main island. Fly through the yellow ring, then the next ring becomes yellow.
+// One lap gives 10 more maximum health.
+function makeRings(parent) {
+	var geo = new THREE.TorusGeometry(RING_SIZE, 1.3, 6, 28);
+	var list = [];
+	for (var i = 0; i < RING_COUNT; i++) {
+		var a = i / RING_COUNT * Math.PI * 2;
+		var far = 1750 + Math.sin(i * 2.3) * 450;
+		var x = Math.cos(a) * far, z = Math.sin(a) * far;
+		var mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, fog: false, toneMapped: false }));
+		mesh.position.set(x, Math.max(ground(x, z), 0) + 90 + (Math.sin(i * 1.7) + 1) * 130, z);
+		mesh.rotation.y = -a;   // the hole points along the circle
+		parent.add(mesh);
+		list.push(mesh);
+	}
+	return list;
+}
+
+function updateRings(game, rides) {
+	var p = game.player.position;
+	for (var i = 0; i < rides.rings.length; i++) {
+		var ring = rides.rings[i];
+		var next = i === rides.ring;
+		ring.material.color.set(next ? 0xffd84a : 0xffffff);
+		ring.material.opacity = next ? 1 : 0.3;
+		ring.visible = Math.abs(ring.position.x - p.x) + Math.abs(ring.position.z - p.z) < (next ? 6000 : 2500);
+	}
+	var target = rides.rings[rides.ring].position;
+	if (rides.current && target.distanceTo(p) < RING_SIZE) {
+		rides.ring++;
+		playShot(0.3, 3);
+		if (rides.ring === rides.rings.length) {
+			rides.ring = 0;
+			rides.laps++;
+			game.maxHp += 10;
+			game.hp = game.maxHp;
+		}
+	}
+	game.ringDone = rides.ring;
 }
 
 // ---------- sound ----------
@@ -555,8 +674,8 @@ function engineSound(rides) {
 	var r = rides.current;
 	var kind = r ? r.stats.kind : '';
 	var speed = r ? (kind === 'heli' ? Math.sqrt(r.vx * r.vx + r.vz * r.vz) * 0.4 : Math.abs(r.speed)) : 0;
-	rides.engine.osc.frequency.value = (kind === 'heli' ? 62 : 38) + speed * 4;
-	rides.engine.gain.gain.value = r && kind !== 'wing' ? 0.05 : 0;
+	rides.engine.osc.frequency.value = kind === 'wing' ? 50 + r.throttle * 70 : (kind === 'heli' ? 62 : 38) + speed * 4;
+	rides.engine.gain.gain.value = !r ? 0 : kind === 'wing' ? 0.012 + r.throttle * 0.035 : 0.05;
 	rides.engine.beatGain.gain.value = kind === 'heli' ? 0.04 : 0;
 }
 
@@ -590,7 +709,11 @@ function updateRides(game, rides, keys, dt) {
 	game.hint = '';
 	if (cur && !rides.started) {
 		game.hint = 'CLICK: START';
-	} else if (cur && (cur.stats.kind === 'heli' || cur.stats.kind === 'wing')) {
+	} else if (cur && cur.stats.kind === 'wing') {
+		// altitude and engine power. On the ground with no power: how to start.
+		var alt = Math.round((cur.y - Math.max(ground(cur.x, cur.z), 0)) / 5) * 5;
+		game.hint = alt === 0 && cur.throttle < 0.05 ? (inVR ? 'R STICK UP: GO' : 'R: POWER') : 'ALT ' + alt + ' P' + Math.round(cur.throttle * 10) * 10;
+	} else if (cur && cur.stats.kind === 'heli') {
 		game.hint = 'ALT ' + Math.round((cur.y - Math.max(ground(cur.x, cur.z), 0)) / 5) * 5 + ' m';
 	} else if (cur) {
 		game.hint = key + 'EXIT';
@@ -610,7 +733,7 @@ function updateRides(game, rides, keys, dt) {
 				parkHeli(ride, dt);
 			}
 			if (ride.stats.kind === 'wing') {
-				parkWing(ride, dt);
+				parkWing(ride, dt, p);
 			}
 			if (!cur && !rides.fall && d < ride.stats.reach && Math.abs(ride.y - p.y) < 4) {
 				game.hint = key + (ride.stats.kind === 'heli' || ride.stats.kind === 'wing' ? 'FLY' : 'DRIVE');
@@ -622,6 +745,11 @@ function updateRides(game, rides, keys, dt) {
 			ride.spin[1].rotation.x += ride.rotor * 40 * dt;
 		}
 	}
+	game.flying = cur !== null && (cur.stats.kind === 'wing' || cur.stats.kind === 'heli');
+	if (!cur) {
+		game.flyVel.set(0, 0, 0);
+	}
+	updateRings(game, rides);
 	if (rides.started && (cur || rides.engine)) {
 		engineSound(rides);
 	}
